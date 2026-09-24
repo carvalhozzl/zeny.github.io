@@ -1,0 +1,22 @@
+{
+  "name": "zeny",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zeny — assistente pessoal com IA: finanças, hábitos e tarefas por voz ou texto.",
+  "scripts": {
+    "dev": "python3 -m http.server 8080 --directory web",
+    "android:init": "npx cap add android && npm run android:prepare",
+    "android:prepare": "node scripts/prepare-android.mjs && npx capacitor-assets generate --android && npx cap sync android",
+    "android:open": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor-community/speech-recognition": "^7.0.0",
+    "@capacitor-community/text-to-speech": "^6.0.0",
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^7.0.0"
+  }
+}

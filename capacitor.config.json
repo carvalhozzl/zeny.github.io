@@ -1,0 +1,11 @@
+{
+  "appId": "com.carvalhozzl.zeny",
+  "appName": "Zeny",
+  "webDir": "web",
+  "android": {
+    "backgroundColor": "#0f0d1a"
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

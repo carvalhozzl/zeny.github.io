@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Zeny</title>
+  <meta name="description" content="Zeny — seu assistente pessoal com IA. Fale ou escreva e o Zeny organiza suas finanças, hábitos e tarefas.">
+  <meta name="theme-color" content="#0f0d1a">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">Z</div>
+        <div>
+          <h1>Zeny</h1>
+          <span id="modeLabel" class="mode">Modo local</span>
+        </div>
+      </div>
+      <button class="icon-btn" data-go="settings" aria-label="Ajustes">⚙️</button>
+    </header>
+
+    <main>
+      <!-- CHAT -->
+      <section id="view-chat" class="view active">
+        <div id="messages" class="messages"></div>
+        <div class="suggestions" id="suggestions">
+          <button>Gastei 45 no mercado</button>
+          <button>Recebi 2500 de salário</button>
+          <button>Lembrar de pagar a luz amanhã</button>
+          <button>Criar hábito beber água</button>
+          <button>Quanto gastei este mês?</button>
+        </div>
+        <form id="composer" class="composer">
+          <input id="input" type="text" placeholder="Fale ou escreva para o Zeny…" autocomplete="off">
+          <button type="button" id="micBtn" class="mic" aria-label="Falar">🎤</button>
+          <button type="submit" class="send" aria-label="Enviar">➤</button>
+        </form>
+      </section>
+
+      <!-- FINANÇAS -->
+      <section id="view-finance" class="view">
+        <div class="month-nav">
+          <button id="prevMonth" class="icon-btn">‹</button>
+          <strong id="monthLabel"></strong>
+          <button id="nextMonth" class="icon-btn">›</button>
+        </div>
+        <div class="seg" id="scopeSeg">
+          <button data-scope="all" class="on">Tudo</button>
+          <button data-scope="pessoal">Pessoal</button>
+          <button data-scope="empresa">Empresa</button>
+        </div>
+        <div class="cards3">
+          <div class="stat"><span>Entradas</span><b id="sumIn" class="pos"></b></div>
+          <div class="stat"><span>Saídas</span><b id="sumOut" class="neg"></b></div>
+          <div class="stat"><span>Saldo</span><b id="sumBal"></b></div>
+        </div>
+        <h3>Por categoria</h3>
+        <div id="catBars" class="bars"></div>
+        <h3>Metas de economia</h3>
+        <div id="goals" class="list"></div>
+        <h3>Assinaturas recorrentes</h3>
+        <div id="subs" class="list"></div>
+        <h3>Lançamentos</h3>
+        <div id="txList" class="list"></div>
+        <button class="fab" id="addTx">+ Lançamento</button>
+      </section>
+
+      <!-- HÁBITOS -->
+      <section id="view-habits" class="view">
+        <div id="habitList" class="list"></div>
+        <button class="fab" id="addHabit">+ Hábito</button>
+      </section>
+
+      <!-- TAREFAS -->
+      <section id="view-tasks" class="view">
+        <div class="seg" id="taskSeg">
+          <button data-f="open" class="on">Pendentes</button>
+          <button data-f="done">Concluídas</button>
+        </div>
+        <div id="taskList" class="list"></div>
+        <button class="fab" id="addTask">+ Tarefa</button>
+      </section>
+
+      <!-- AJUSTES -->
+      <section id="view-settings" class="view">
+        <h3>Inteligência artificial</h3>
+        <p class="muted">Conectado ao servidor do Zeny, ele conversa livremente usando o Claude. Sem servidor, entende comandos comuns em português direto no aparelho.</p>
+        <label class="field">Servidor da IA
+          <input id="serverUrl" type="url" placeholder="https://zeny-server.seu-usuario.workers.dev">
+        </label>
+        <label class="check"><input type="checkbox" id="speak"> Zeny responde em voz alta</label>
+        <label class="field">Seu nome
+          <input id="userName" type="text" placeholder="Como o Zeny deve te chamar?">
+        </label>
+        <button id="saveSettings" class="primary">Salvar</button>
+        <h3>Dados</h3>
+        <p class="muted">Tudo fica salvo só neste aparelho.</p>
+        <div class="row-btns">
+          <button id="exportData">Exportar backup</button>
+          <label class="btn-like">Importar<input type="file" id="importData" accept="application/json" hidden></label>
+          <button id="clearData" class="danger">Apagar tudo</button>
+        </div>
+      </section>
+    </main>
+
+    <nav class="tabbar">
+      <button data-go="chat" class="on"><span>💬</span>Zeny</button>
+      <button data-go="finance"><span>💰</span>Finanças</button>
+      <button data-go="habits"><span>🔥</span>Hábitos</button>
+      <button data-go="tasks"><span>✅</span>Tarefas</button>
+    </nav>
+  </div>
+
+  <dialog id="modal"><form method="dialog" id="modalForm"></form></dialog>
+  <div id="toast" class="toast"></div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
