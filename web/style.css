@@ -1,33 +1,37 @@
-/* Zeny — identidade: preto profundo com roxo elétrico, âmbar para conquistas.
+/* Zeny — identidade: fundo roxo vivo que escurece até o grafite, peças em grafite
+   com detalhes roxos (como ícones roxos sobre fundo escuro), âmbar para conquistas.
    Tema escuro é o padrão; o claro só entra quando escolhido nos Ajustes. */
 
 :root {
-  --bg: #07060A;
-  --surface: #111017;
-  --surface-2: #18161F;
-  --sunken: #0C0B11;
-  --line: #231F2E;
-  --line-strong: #362F46;
-  --ink: #F1EDF8;
-  --ink-2: #C7BFDA;
-  --muted: #8F87A6;
-  --accent: #9B6BFF;
-  --accent-hover: #B18CFF;
+  --page: linear-gradient(180deg, #7B2FD8 0%, #5A23A8 22%, #3A2156 48%, #26232B 72%, #1E1D22 100%);
+  --bg: #1E1D22;
+  --surface: #28262C;
+  --surface-2: #302D35;
+  --sunken: #1F1D23;
+  --line: #36333D;
+  --line-strong: #47434F;
+  --ink: #F4F1F8;
+  --ink-2: #CFC8DB;
+  --muted: #9C95A8;
+  --accent: #9A4DFF;
+  --accent-hover: #AE6BFF;
   --accent-ink: #FFFFFF;
-  --accent-soft: #231638;
-  --hero: radial-gradient(120% 140% at 100% 0%, #5B2BC2 0%, #2A1257 45%, #140A26 100%);
+  --accent-soft: #3A2A52;
+  --hero: radial-gradient(120% 140% at 100% 0%, rgba(154, 77, 255, .45) 0%, rgba(154, 77, 255, .12) 45%, rgba(0, 0, 0, 0) 75%), #26232B;
   --hero-ink: #F6F1FF;
   --hero-muted: #BFA9EE;
   --hero-track: rgba(255, 255, 255, .16);
   --amber: #F0AE45;
-  --amber-soft: #33260F;
+  --amber-soft: #43351C;
   --in: #3CC98A;
-  --in-soft: #0F2E1F;
+  --in-soft: #183A2A;
   --out: #F07366;
-  --out-soft: #36171A;
+  --out-soft: #45232A;
   --info: #7DA2F5;
-  --info-soft: #17213F;
-  --glow: rgba(155, 107, 255, .45);
+  --info-soft: #232E4A;
+  --glow: rgba(154, 77, 255, .5);
+  --mark-bg: #2E2B33;
+  --mark-fg: #9A4DFF;
   --scrim: rgba(0, 0, 0, .65);
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -14px rgba(0, 0, 0, .8);
   --shadow-lg: 0 24px 60px -20px rgba(0, 0, 0, .9);
@@ -42,7 +46,7 @@
 }
 /* Tema claro, escolhido nos Ajustes do Zeny. */
 :root[data-zeny-theme="light"] {
-  --bg: #F5F3FA; --surface: #FFFFFF; --surface-2: #F8F6FC; --sunken: #ECE8F4;
+  --page: #F5F3FA; --bg: #F5F3FA; --surface: #FFFFFF; --surface-2: #F8F6FC; --sunken: #ECE8F4;
   --line: #E4DFEE; --line-strong: #CFC7DF; --ink: #17122A; --ink-2: #3F3656; --muted: #6D6485;
   --accent: #7C3AED; --accent-hover: #6D28D9; --accent-ink: #FFFFFF; --accent-soft: #EDE5FD;
   --hero: radial-gradient(120% 140% at 100% 0%, #6D3BE0 0%, #3A1A86 50%, #221049 100%);
@@ -50,6 +54,7 @@
   --amber: #D98A12; --amber-soft: #FBEFD9; --in: #16895A; --in-soft: #DDF3E8;
   --out: #CF4A3F; --out-soft: #FBE4E1; --info: #2F6BD8; --info-soft: #E1EAFB;
   --glow: rgba(124, 58, 237, .35);
+  --mark-bg: #2E2B33; --mark-fg: #A35CFF;
   --scrim: rgba(23, 18, 42, .45);
   --shadow: 0 1px 2px rgba(23, 18, 42, .05), 0 10px 28px -14px rgba(23, 18, 42, .22);
   --shadow-lg: 0 24px 60px -20px rgba(23, 18, 42, .35);
@@ -62,6 +67,8 @@ html, body { height: 100%; }
 body {
   margin: 0;
   background: var(--bg);
+  background-image: var(--page);
+  background-attachment: fixed;
   color: var(--ink);
   font: 15px/1.5 var(--f-body);
   -webkit-font-smoothing: antialiased;
@@ -98,7 +105,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   padding: 20px 0 16px;
 }
 .page-head h1 { font: 700 28px/1.1 var(--f-display); letter-spacing: -.02em; text-wrap: balance; }
-.page-head p { color: var(--muted); margin-top: 4px; font-size: 14px; }
+.page-head p { color: var(--ink-2); margin-top: 4px; font-size: 14px; }
 .head-actions { display: flex; gap: 8px; align-items: center; }
 
 .chat { display: none; }
@@ -260,7 +267,7 @@ button.row:hover, .row.clickable:hover { background: var(--surface-2); border-ra
 }
 
 .hero {
-  background: var(--hero); color: var(--hero-ink); border: 0;
+  background: var(--hero); color: var(--hero-ink); border: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 16px; position: relative; overflow: hidden;
 }
 .hero::after {
@@ -479,7 +486,7 @@ dialog.celebrate .burst {
 .chat-title small.ai::before { background: var(--in); }
 #speakToggle[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
 
-.messages { flex: 1; overflow-y: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 10px; overscroll-behavior: contain; background: var(--bg); }
+.messages { flex: 1; overflow-y: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 10px; overscroll-behavior: contain; background: var(--sunken); }
 .day-sep { align-self: center; font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; padding: 6px 0; }
 .msg { max-width: 88%; display: flex; flex-direction: column; gap: 6px; }
 .msg.user { align-self: flex-end; align-items: flex-end; }
@@ -532,7 +539,7 @@ dialog.celebrate .burst {
 
 /* ---------- Boas-vindas ---------- */
 .onboard {
-  position: fixed; inset: 0; z-index: 60; background: var(--bg); overflow-y: auto;
+  position: fixed; inset: 0; z-index: 60; background: var(--bg); background-image: var(--page); overflow-y: auto;
   display: flex; justify-content: center; align-items: flex-start;
   padding: max(24px, env(safe-area-inset-top, 0px)) 16px max(24px, env(safe-area-inset-bottom, 0px));
 }

@@ -3,7 +3,7 @@
   "appName": "Zeny",
   "webDir": "web",
   "android": {
-    "backgroundColor": "#07060A"
+    "backgroundColor": "#1E1D22"
   },
   "server": {
     "androidScheme": "https"
