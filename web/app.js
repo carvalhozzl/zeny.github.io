@@ -782,7 +782,8 @@ Regras:
   let sampleFn = null;
   let sampleOff = false;
   let downloadsApi = null;
-  const serverUrl = () => (S.settings.serverUrl || CFG.serverUrl || '').trim().replace(/\/+$/, '');
+  // O endereço do servidor vem só do config.js (não é editável pelo usuário).
+  const serverUrl = () => (CFG.serverUrl || '').trim().replace(/\/+$/, '');
   const aiMode = () => (sampleFn && !sampleOff ? 'claude' : serverUrl() ? 'server' : 'local');
   const AI_LABEL = { claude: 'IA do Claude ativa', server: 'IA conectada', local: 'Modo local' };
 
@@ -1730,7 +1731,6 @@ Regras:
           <select id="setVoice" data-set="voiceURI" class="voice-select"><option value="">Automática</option>${ptVoices().map((v) => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === S.settings.voiceURI ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>` : ''}
         <div class="set-row"><div class="grow"><div class="title">Ouvir exemplo</div><div class="desc">Teste a voz e a personalidade escolhidas.</div></div><button type="button" class="btn sm ghost" data-act="voice-test">${ic('volume', 'sm')}Ouvir</button></div>
         <div class="set-row"><div class="grow"><div class="title">Avisos de meta atingida</div><div class="desc">${notifStatus === 'granted' ? 'Você recebe uma notificação quando juntar o valor de um desejo ou meta.' : notifStatus === 'denied' ? 'Bloqueados. Libere as notificações nas configurações do navegador ou do celular.' : notifStatus === 'default' ? 'Receba uma notificação quando juntar o valor de um desejo ou meta.' : 'Aqui o aviso aparece dentro do app.'}</div></div>${notifStatus === 'granted' ? `<button type="button" class="switch ${S.settings.notify !== false ? 'on' : ''}" data-act="notif-toggle" role="switch" aria-checked="${S.settings.notify !== false}" aria-label="Avisos de meta atingida"></button>` : notifStatus === 'default' ? `<button type="button" class="btn sm ghost" data-act="notif-enable">${ic('bell', 'sm')}Ativar</button>` : ''}</div>
-        <div class="set-row"><div class="grow"><div class="title">Servidor da IA</div><div class="desc">Opcional. Endereço do servidor que guarda a chave da API.</div></div><input type="url" id="setServer" data-set="serverUrl" value="${esc(S.settings.serverUrl || CFG.serverUrl || '')}" placeholder="https://…workers.dev"></div>
       </section>
       <section class="card">
         <header class="card-head"><h2>Dados</h2></header>
