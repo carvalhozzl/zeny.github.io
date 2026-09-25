@@ -29,20 +29,30 @@ jobs:
           if [ -z "$ID" ]; then echo "::error::CLOUDFLARE_ACCOUNT_ID não tem um ID de conta válido (32 letras e números)."; exit 1; fi
           echo "::add-mask::$ID"
           echo "CLOUDFLARE_ACCOUNT_ID=$ID" >> "$GITHUB_ENV"
+      # Aceita o token puro ou o comando de teste "curl ... Bearer TOKEN" que a Cloudflare mostra.
+      - name: Conferir token da Cloudflare
+        env:
+          RAW_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if printf '%s' "$RAW_TOKEN" | grep -q 'Bearer'; then
+            TOKEN=$(printf '%s' "$RAW_TOKEN" | grep -oE 'Bearer[[:space:]]+[A-Za-z0-9_-]+' | head -n1 | awk '{print $2}')
+          else
+            TOKEN=$(printf '%s' "$RAW_TOKEN" | tr -d '[:space:]"')
+          fi
+          if [ -z "$TOKEN" ]; then echo "::error::CLOUDFLARE_API_TOKEN vazio ou inválido."; exit 1; fi
+          echo "::add-mask::$TOKEN"
+          echo "CLOUDFLARE_API_TOKEN=$TOKEN" >> "$GITHUB_ENV"
       - name: Publicar Worker
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npx wrangler deploy
       - name: Gravar chave da API como segredo
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: echo "$ANTHROPIC_API_KEY" | npx wrangler secret put ANTHROPIC_API_KEY
       - name: Gravar chaves da Stripe como segredo
         if: ${{ env.HAS_STRIPE == 'true' }}
         env:
           HAS_STRIPE: ${{ secrets.STRIPE_SECRET_KEY != '' }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
         run: |
