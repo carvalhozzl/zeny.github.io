@@ -62,15 +62,15 @@
 
   // ---------- Categorias ----------
   const CATS = {
-    'Alimentação': { icon: 'food', color: '#E07A3F', words: ['mercado', 'supermercado', 'restaurante', 'lanche', 'ifood', 'comida', 'padaria', 'almoco', 'jantar', 'cafe', 'pizza', 'acougue', 'feira', 'hamburguer', 'sorvete'] },
-    'Transporte': { icon: 'car', color: '#3B82C4', words: ['uber', 'gasolina', 'combustivel', 'onibus', 'estacionamento', 'pedagio', 'taxi', 'metro', 'carro', 'mecanico', 'passagem'] },
+    'Alimentação': { icon: 'food', color: '#E07A3F', words: ['mercado', 'supermercado', 'pao', 'leite', 'acai', 'restaurante', 'lanche', 'ifood', 'comida', 'padaria', 'almoco', 'jantar', 'cafe', 'pizza', 'acougue', 'feira', 'hamburguer', 'sorvete'] },
+    'Transporte': { icon: 'car', color: '#3B82C4', words: ['uber', 'moto', 'gasolina', 'combustivel', 'onibus', 'estacionamento', 'pedagio', 'taxi', 'metro', 'carro', 'mecanico', 'passagem'] },
     'Moradia': { icon: 'home', color: '#7A68C9', words: ['aluguel', 'luz', 'energia', 'agua', 'condominio', 'internet', 'gas', 'iptu', 'reforma', 'movel'] },
     'Saúde': { icon: 'heart', color: '#D2495E', words: ['farmacia', 'remedio', 'medico', 'academia', 'dentista', 'consulta', 'exame', 'plano de saude', 'hospital'] },
     'Lazer': { icon: 'smile', color: '#C79A12', words: ['cinema', 'bar', 'show', 'viagem', 'festa', 'jogo', 'passeio', 'cerveja', 'balada'] },
     'Educação': { icon: 'book', color: '#2E9E8F', words: ['curso', 'escola', 'faculdade', 'livro', 'material escolar'] },
     'Compras': { icon: 'bag', color: '#C2569B', words: ['roupa', 'loja', 'shopping', 'presente', 'amazon', 'mercado livre', 'shopee', 'tenis', 'celular'] },
     'Assinaturas': { icon: 'repeat', color: '#5B7FA6', words: ['netflix', 'spotify', 'prime', 'disney', 'youtube', 'assinatura', 'hbo', 'globoplay', 'icloud'] },
-    'Contas': { icon: 'receipt', color: '#8A7B6B', words: ['cartao', 'fatura', 'boleto', 'emprestimo', 'juros', 'imposto', 'taxa'] },
+    'Contas': { icon: 'receipt', color: '#8A7B6B', words: ['cartao', 'fatura', 'boleto', 'seguro', 'emprestimo', 'juros', 'imposto', 'taxa'] },
     'Salário': { icon: 'briefcase', color: '#16895A', words: ['salario', 'holerite'] },
     'Vendas': { icon: 'up', color: '#2F9E6E', words: ['venda', 'vendi', 'cliente', 'servico', 'freela', 'freelance', 'faturei', 'projeto'] },
     'Outros': { icon: 'dots', color: '#7B8784', words: [] },
@@ -82,7 +82,8 @@
   function guessCat(text, type) {
     const t = norm(text);
     for (const [cat, meta] of Object.entries(CATS)) {
-      if (meta.words.some((w) => new RegExp(`\\b${w}`).test(t))) return cat;
+      // Palavras curtas precisam bater inteiras ("gas" não pode casar com "gastei").
+      if (meta.words.some((w) => new RegExp(w.length <= 4 ? `\\b${w}\\b` : `\\b${w}`).test(t))) return cat;
     }
     return type === 'in' ? 'Outras receitas' : 'Outros';
   }
@@ -567,7 +568,7 @@
     for (const w of words) s = s.replace(new RegExp(`\\s${w}(?=\\s)`, 'gi'), ' ');
     return s.replace(/\s+/g, ' ').trim();
   }
-  const STOP_MONEY = ['gastei', 'paguei', 'comprei', 'recebi', 'ganhei', 'vendi', 'entrou', 'caiu', 'torrei', 'me', 'pagaram', 'hoje', 'ontem', 'amanha', 'amanhã', 'com', 'no', 'na', 'nos', 'nas', 'de', 'do', 'da', 'em', 'pra', 'para', 'o', 'a', 'os', 'as', 'um', 'uma', 'reais', 'real', 'r\\$', 'eu', 'foi', 'pela', 'pelo', 'empresa', 'pessoal', 'mais', 'uns', 'umas', 'e'];
+  const STOP_MONEY = ['gastei', 'paguei', 'comprei', 'recebi', 'ganhei', 'vendi', 'entrou', 'caiu', 'torrei', 'me', 'pagaram', 'hoje', 'ontem', 'amanha', 'amanhã', 'com', 'no', 'na', 'nos', 'nas', 'de', 'do', 'da', 'em', 'pra', 'para', 'o', 'a', 'os', 'as', 'um', 'uma', 'reais', 'real', 'r\\$', 'eu', 'foi', 'pela', 'pelo', 'empresa', 'pessoal', 'mais', 'uns', 'umas', 'e', 'esse', 'este', 'mes', 'mês', 'neste', 'nesse', 'agora', 'ai', 'aí'];
   const UNDO_RE = /^(desfaz(er)?|desfaca|cancela(r)?( isso)?|apaga (o|a) ultim[oa]|volta(r)?)\b/;
 
   function localParse(rawInput) {
@@ -576,6 +577,7 @@
     const orig = (frag) => { const i = t.indexOf(frag); return i >= 0 ? input.slice(i, i + frag.length) : frag; };
     const amt = parseAmount(t);
     const name = S.settings.userName;
+    const askBalance = /\b(quanto (que )?(eu )?(fiquei|sobrou|sobra|tenho|restou|resta|ficou|vai sobrar|vou ter)|qual (e |eh )?(o )?(meu )?saldo|como (eu )?fiquei)\b/.test(t);
 
     if (/^(oi|ola|e ai|bom dia|boa tarde|boa noite|hey|opa)\b/.test(t) && t.split(' ').length <= 4) {
       return { reply: `${greeting()}${name ? ', ' + name : ''}! Como posso ajudar? Pode me contar um gasto, pedir um lembrete ou marcar um hábito.` };
@@ -584,6 +586,7 @@
     if (/\b(ajuda|o que voce faz|como funciona|comandos)\b/.test(t)) return { reply: HELP };
 
     // Consultas
+    if (askBalance && !/\b(recebi|ganhei|gastei|paguei|comprei|entrou|caiu)\b/.test(t)) return { reply: balanceAnswer() };
     if (/\b(quanto (eu )?gastei|meus gastos|saldo|resumo financeiro|balanco|como estao (minhas )?financas|quanto (eu )?recebi)\b/.test(t)) return { reply: financeSummary() };
     if (/\b(minhas tarefas|quais (sao as )?tarefas|o que (eu )?(tenho|preciso) (pra|para|que) fazer|tarefas pendentes|lista de tarefas|minha agenda)\b/.test(t)) return { reply: tasksSummary() };
     if (/\b(meus habitos|como estao (meus )?habitos|habitos de hoje)\b/.test(t)) return { reply: habitsSummary() };
@@ -670,23 +673,45 @@
       if (tk && !amt) return { actions: [{ type: 'complete_task', title: tk.title }], reply: 'Tarefa concluída. Menos uma!' };
     }
 
-    // Dinheiro
-    const outVerb = /\b(gastei|paguei|comprei|gasto|despesa|saiu|torrei|pagar(?:am)?\s+(?:a|o)|conta de)\b/.test(t);
-    const inVerb = /\b(recebi|ganhei|vendi|entrou|receita|salario|faturei|caiu|me pagaram|pix de)\b/.test(t);
+    // Dinheiro. Cada trecho tem seu próprio tipo: "recebi 4000, gastei 3700 na fatura"
+    // vira uma entrada e um gasto; "moto 678 seguro 87" vira dois lançamentos.
+    const OUT_RE = /\b(gastei|paguei|comprei|gasto|despesa|saiu|torrei|transferi|pagar(?:am)?\s+(?:a|o)|conta de)\b/;
+    const IN_RE = /\b(recebi|ganhei|vendi|entrou|receita|salario|faturei|caiu|me pagaram|pix de)\b/;
+    const outVerb = OUT_RE.test(t);
+    const inVerb = IN_RE.test(t);
     const taskHint = /\b(lembr|lembrete|tarefa|preciso|tenho que|nao esquecer|nao deixar)/.test(t);
     if (amt && (outVerb || inVerb) && !taskHint) {
-      const type = inVerb && !outVerb ? 'in' : 'out';
       const { due } = parseDue(t);
       const date = due && due <= today() ? due : today();
-      // "gastei 30 no uber e 50 no mercado" vira dois lançamentos.
-      const parts = t.split(/\s+e\s+|,\s+|;\s*/).filter((seg) => parseAmount(seg));
-      const segs = parts.length > 1 ? parts : [t];
-      const actions = segs.map((seg) => {
-        const a = parseAmount(seg);
-        const desc = stripWords(orig(seg).toLowerCase().replace(a.raw, ''), STOP_MONEY) || guessCat(seg, type);
-        return { type: 'add_transaction', kind: type, amount: a.value, description: desc, category: guessCat(seg, type), scope: guessScope(t), date };
-      });
-      return { actions, reply: () => (type === 'in' ? 'Entrada registrada!' : 'Gasto registrado. ' + budgetHint()) };
+      const actions = [];
+      let cur = null;
+      for (let clause of t.split(/\s+e\s+|,(?!\d)\s*|;\s*|\.\s+/)) {
+        clause = clause.replace(/\b(quanto|qual|como)\b.*$/, ''); // a pergunta do final não é lançamento
+        if (IN_RE.test(clause) && !OUT_RE.test(clause)) cur = 'in';
+        else if (OUT_RE.test(clause)) cur = 'out';
+        const found = [...clause.matchAll(new RegExp(AMOUNT_RE.source, 'gi'))];
+        if (!found.length) continue;
+        const type = cur || (inVerb && !outVerb ? 'in' : 'out');
+        found.forEach((m, i) => {
+          const from = found.length > 1 && i > 0 ? found[i - 1].index + found[i - 1][0].length : 0;
+          const to = found.length > 1 ? m.index + m[0].length : clause.length;
+          const piece = clause.slice(from, to);
+          const desc = stripWords(orig(piece).toLowerCase().replace(m[0], ' '), STOP_MONEY);
+          const category = guessCat(desc || piece.replace(OUT_RE, '').replace(IN_RE, ''), type);
+          actions.push({ type: 'add_transaction', kind: type, amount: amountValue(m), description: desc || (type === 'in' ? 'Entrada' : category), category, scope: guessScope(t), date });
+        });
+      }
+      return {
+        actions,
+        reply: () => {
+          const nIn = actions.filter((a) => a.kind === 'in').length;
+          const nOut = actions.length - nIn;
+          let r = cap([nIn && plural(nIn, 'entrada registrada', 'entradas registradas'), nOut && plural(nOut, 'gasto registrado', 'gastos registrados')].filter(Boolean).join(' e ')) + '.';
+          if (askBalance) r += '\n\n' + balanceAnswer();
+          else if (nOut) r += ' ' + budgetHint();
+          return r;
+        },
+      };
     }
 
     // Tarefas
@@ -713,6 +738,12 @@
 
     if (amt) return { reply: `Entendi o valor de ${money(amt.value)}, mas foi um gasto ou uma entrada? Ex.: "gastei ${amt.value} no mercado" ou "recebi ${amt.value}".` };
     return { reply: 'Não entendi muito bem.\n' + HELP };
+  }
+  function balanceAnswer() {
+    const now = new Date();
+    const tt = totals(monthTx(now.getFullYear(), now.getMonth()));
+    return `**Como você fica em ${monthName(now.getFullYear(), now.getMonth())}**\n• Entradas: ${money(tt.inc)}\n• Saídas: ${money(tt.out)}\n• Saldo: ${money(tt.bal)}\n\n` +
+      (tt.bal >= 0 ? `Sobram **${money(tt.bal)}** para passar o mês.` : `Faltam **${money(-tt.bal)}** para fechar o mês.`);
   }
   function budgetHint() {
     const now = new Date();
@@ -747,6 +778,8 @@ Ações disponíveis (use quantas forem necessárias, ou nenhuma):
 
 Regras:
 - Uma mensagem pode conter várias informações (ex.: "gastei 30 no uber e 50 no mercado" = 2 transações).
+- Classifique cada valor separadamente: "recebi/ganhei/salário" = kind "in"; "gastei/paguei/comprei" = kind "out". Ex.: "recebi 4000, gastei 3700 na fatura" = 1 entrada e 1 gasto.
+- Se a pessoa perguntar quanto sobra ou como fica o mês, some os lançamentos novos aos do contexto e responda o saldo.
 - Calcule datas relativas (amanhã, sexta, dia 15) a partir da data de hoje do contexto.
 - "Quero comprar X de R$ Y" é um desejo de compra (add_wish). Metas sem um item específico (reserva, viagem) usam add_goal.
 - "Guardei 200 para X": use add_to_wish se X estiver em desejos_de_compra, senão add_to_goal.

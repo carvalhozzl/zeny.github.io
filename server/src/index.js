@@ -34,6 +34,8 @@ Ações disponíveis (use quantas forem necessárias, ou nenhuma):
 
 Regras:
 - Uma mensagem pode conter várias informações (ex.: "gastei 30 no uber e 50 no mercado" = 2 transações).
+- Classifique cada valor separadamente: "recebi/ganhei/salário" = kind "in"; "gastei/paguei/comprei" = kind "out". Ex.: "recebi 4000, gastei 3700 na fatura" = 1 entrada e 1 gasto.
+- Se a pessoa perguntar quanto sobra ou como fica o mês, some os lançamentos novos aos do contexto e responda o saldo.
 - Calcule datas relativas (amanhã, sexta, dia 15) a partir da data de hoje do contexto.
 - "Quero comprar X de R$ Y" é um desejo de compra (add_wish). Metas sem um item específico (reserva, viagem) usam add_goal.
 - "Guardei 200 para X": use add_to_wish se X estiver em desejos_de_compra, senão add_to_goal.
