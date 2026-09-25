@@ -45,7 +45,6 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "CLOUDFLARE_API_TOKEN=$TOKEN" >> "$GITHUB_ENV"
       - name: Publicar Worker
-        env:
         run: npx wrangler deploy
       - name: Gravar chave da API como segredo
         env:
