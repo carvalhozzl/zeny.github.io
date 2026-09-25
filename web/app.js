@@ -1,82 +1,243 @@
-/* Zeny — assistente pessoal com IA
+/* Zeny — assistente pessoal com IA.
  * Finanças, hábitos e tarefas organizados por conversa (texto ou voz).
- * Dados ficam no localStorage do aparelho. IA opcional via API do Claude.
+ *
+ * IA, em ordem de preferência:
+ *   1. Claude pelo claude.ai, quando a página roda como Artifact (capacidade "sample");
+ *   2. servidor próprio (server/), que guarda a chave da API;
+ *   3. interpretador local em português, que funciona sem internet.
+ * Os dados ficam no localStorage do aparelho.
  */
 (() => {
   'use strict';
 
-  // ---------- Estado ----------
+  const VERSION = '2.0.0';
+  const CFG = window.ZENY_CONFIG || {};
   const STORE_KEY = 'zeny:v1';
-  const defaults = () => ({
-    tx: [], goals: [], subs: [], habits: [], tasks: [], chat: [],
-    settings: { serverUrl: '', speak: false, userName: '' },
-  });
-  let S = load();
-
-  function load() {
-    try {
-      const raw = localStorage.getItem(STORE_KEY);
-      if (raw) return Object.assign(defaults(), JSON.parse(raw));
-    } catch (e) { /* armazenamento indisponível */ }
-    return defaults();
-  }
-  function save() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { /* ignora */ }
-  }
 
   // ---------- Utilidades ----------
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
-  const uid = () => Math.random().toString(36).slice(2, 10);
+  const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  const money = (v) => (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-  const cap = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+  const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
   const pad = (n) => String(n).padStart(2, '0');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sum = (list) => list.reduce((s, t) => s + t.amount, 0);
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+  const moneyFmt = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+  const compactFmt = new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 });
+  const money = (v) => moneyFmt.format(Number(v) || 0);
+  const compact = (v) => compactFmt.format(Number(v) || 0);
+  const moneyShort = (v) => (Math.abs(v) >= 10000 ? 'R$ ' + compact(v) : money(v));
+
   const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   const today = () => ymd(new Date());
   const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
-  const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const parseYmd = (s) => { const [y, m, d] = String(s).split('-').map(Number); return new Date(y, (m || 1) - 1, d || 1); };
+  const isYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || '');
+  const monthKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+  const daysInMonth = (y, m) => new Date(y, m + 1, 0).getDate();
+  const monthName = (y, m) => new Date(y, m, 1).toLocaleDateString('pt-BR', { month: 'long' });
+  const shortMonth = (d) => d.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '');
+  const longDate = (d) => d.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
+  const fmtTime = (ts) => new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   const fmtDate = (s) => {
     if (!s) return '';
     if (s === today()) return 'hoje';
     if (s === ymd(addDays(new Date(), 1))) return 'amanhã';
     if (s === ymd(addDays(new Date(), -1))) return 'ontem';
-    return parseYmd(s).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
+    return parseYmd(s).toLocaleDateString('pt-BR', { day: 'numeric', month: 'short' }).replace('.', '');
   };
+  const dayLabel = (s) => {
+    const f = fmtDate(s);
+    if (f === 'hoje' || f === 'ontem' || f === 'amanhã') return cap(f);
+    return cap(parseYmd(s).toLocaleDateString('pt-BR', { weekday: 'short', day: 'numeric', month: 'short' }).replace(/\./g, ''));
+  };
+  const greeting = () => { const h = new Date().getHours(); return h < 5 ? 'Boa noite' : h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite'; };
 
-  function toast(msg) {
-    const t = $('#toast');
-    t.textContent = msg;
-    t.classList.add('show');
-    clearTimeout(toast._t);
-    toast._t = setTimeout(() => t.classList.remove('show'), 2400);
-  }
+  const ic = (name, cls = '') => `<svg class="ic ${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 
   // ---------- Categorias ----------
   const CATS = {
-    'Alimentação': ['mercado', 'supermercado', 'restaurante', 'lanche', 'ifood', 'comida', 'padaria', 'almoco', 'jantar', 'cafe', 'pizza', 'acougue', 'feira', 'hamburguer', 'sorvete'],
-    'Transporte': ['uber', 'gasolina', 'combustivel', 'onibus', 'estacionamento', 'pedagio', 'taxi', 'metro', 'carro', 'mecanico', 'passagem'],
-    'Moradia': ['aluguel', 'luz', 'energia', 'agua', 'condominio', 'internet', 'gas', 'iptu', 'reforma', 'movel'],
-    'Saúde': ['farmacia', 'remedio', 'medico', 'academia', 'dentista', 'consulta', 'exame', 'plano de saude', 'hospital'],
-    'Lazer': ['cinema', 'bar', 'show', 'viagem', 'festa', 'jogo', 'passeio', 'cerveja', 'balada'],
-    'Educação': ['curso', 'escola', 'faculdade', 'livro', 'material escolar', 'mensalidade escolar'],
-    'Compras': ['roupa', 'loja', 'shopping', 'presente', 'amazon', 'mercado livre', 'shopee', 'tenis', 'celular'],
-    'Assinaturas': ['netflix', 'spotify', 'prime', 'disney', 'youtube', 'assinatura', 'hbo', 'globoplay', 'icloud'],
-    'Contas': ['cartao', 'fatura', 'boleto', 'emprestimo', 'juros', 'imposto', 'taxa'],
-    'Salário': ['salario', 'pagamento do trabalho', 'holerite'],
-    'Vendas': ['venda', 'vendi', 'cliente', 'servico', 'freela', 'freelance', 'faturei'],
+    'Alimentação': { icon: 'food', color: '#E07A3F', words: ['mercado', 'supermercado', 'restaurante', 'lanche', 'ifood', 'comida', 'padaria', 'almoco', 'jantar', 'cafe', 'pizza', 'acougue', 'feira', 'hamburguer', 'sorvete'] },
+    'Transporte': { icon: 'car', color: '#3B82C4', words: ['uber', 'gasolina', 'combustivel', 'onibus', 'estacionamento', 'pedagio', 'taxi', 'metro', 'carro', 'mecanico', 'passagem'] },
+    'Moradia': { icon: 'home', color: '#7A68C9', words: ['aluguel', 'luz', 'energia', 'agua', 'condominio', 'internet', 'gas', 'iptu', 'reforma', 'movel'] },
+    'Saúde': { icon: 'heart', color: '#D2495E', words: ['farmacia', 'remedio', 'medico', 'academia', 'dentista', 'consulta', 'exame', 'plano de saude', 'hospital'] },
+    'Lazer': { icon: 'smile', color: '#C79A12', words: ['cinema', 'bar', 'show', 'viagem', 'festa', 'jogo', 'passeio', 'cerveja', 'balada'] },
+    'Educação': { icon: 'book', color: '#2E9E8F', words: ['curso', 'escola', 'faculdade', 'livro', 'material escolar'] },
+    'Compras': { icon: 'bag', color: '#C2569B', words: ['roupa', 'loja', 'shopping', 'presente', 'amazon', 'mercado livre', 'shopee', 'tenis', 'celular'] },
+    'Assinaturas': { icon: 'repeat', color: '#5B7FA6', words: ['netflix', 'spotify', 'prime', 'disney', 'youtube', 'assinatura', 'hbo', 'globoplay', 'icloud'] },
+    'Contas': { icon: 'receipt', color: '#8A7B6B', words: ['cartao', 'fatura', 'boleto', 'emprestimo', 'juros', 'imposto', 'taxa'] },
+    'Salário': { icon: 'briefcase', color: '#16895A', words: ['salario', 'holerite'] },
+    'Vendas': { icon: 'up', color: '#2F9E6E', words: ['venda', 'vendi', 'cliente', 'servico', 'freela', 'freelance', 'faturei', 'projeto'] },
+    'Outros': { icon: 'dots', color: '#7B8784', words: [] },
+    'Outras receitas': { icon: 'in', color: '#4E9F82', words: [] },
   };
+  const CAT_NAMES = Object.keys(CATS);
+  const catMeta = (c) => CATS[c] || CATS[CAT_NAMES.find((k) => norm(k) === norm(c))] || CATS.Outros;
+  const catIcon = (c) => { const m = catMeta(c); return `<span class="cat-ic" style="background:${m.color}24;color:${m.color}">${ic(m.icon)}</span>`; };
   function guessCat(text, type) {
     const t = norm(text);
-    for (const [cat, words] of Object.entries(CATS)) {
-      if (words.some((w) => new RegExp(`\\b${w}`).test(t))) return cat;
+    for (const [cat, meta] of Object.entries(CATS)) {
+      if (meta.words.some((w) => new RegExp(`\\b${w}`).test(t))) return cat;
     }
     return type === 'in' ? 'Outras receitas' : 'Outros';
   }
-  const guessScope = (text) => /\b(empresa|negocio|cnpj|mei|cliente|firma|loja da empresa)\b/.test(norm(text)) ? 'empresa' : 'pessoal';
+  const guessScope = (text) => (/\b(empresa|negocio|cnpj|mei|firma)\b/.test(norm(text)) ? 'empresa' : 'pessoal');
 
-  // ---------- Ações (compartilhadas entre IA e parser local) ----------
+  // ---------- Planos ----------
+  const DEFAULT_PLANS = [
+    { id: 'basico', name: 'Básico', monthly: null, annual: null, limits: {}, features: [] },
+  ];
+  const PLAN_CFG = CFG.plans || {};
+  const PLANS = Array.isArray(PLAN_CFG.list) && PLAN_CFG.list.length ? PLAN_CFG.list : DEFAULT_PLANS;
+  const ENFORCE = !!PLAN_CFG.enforce;
+  const currentPlan = () => PLANS.find((p) => p.id === S.settings.plan) || PLANS[0];
+  const limitOf = (key) => (currentPlan().limits || {})[key];
+  const allowed = (key) => !ENFORCE || limitOf(key) !== false;
+  const underLimit = (key, count) => { if (!ENFORCE) return true; const v = limitOf(key); return v == null || count < v; };
+  const planWith = (key) => PLANS.find((p) => { const v = (p.limits || {})[key]; return v === true || v == null; });
+  function gate(text) { toast(text, { label: 'Ver planos', fn: () => go('plans') }); }
+
+  // ---------- Estado ----------
+  const defaultSettings = () => ({
+    serverUrl: '', speak: false, userName: '', theme: 'system', budget: 0,
+    onboarded: false, plan: PLANS[0].id, billing: 'annual', lastView: 'home',
+  });
+  const defaults = () => ({ v: 2, tx: [], goals: [], subs: [], habits: [], tasks: [], chat: [], demo: false, usage: { month: '', ai: 0 }, settings: defaultSettings() });
+
+  function initialLastPosted(day) {
+    const now = new Date();
+    return now.getDate() >= Math.min(day, daysInMonth(now.getFullYear(), now.getMonth()))
+      ? monthKey(now)
+      : monthKey(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  }
+
+  function migrate(raw) {
+    const d = raw && typeof raw === 'object' ? raw : {};
+    const s = defaults();
+    for (const k of ['tx', 'goals', 'subs', 'habits', 'tasks', 'chat']) s[k] = Array.isArray(d[k]) ? d[k] : [];
+    s.demo = !!d.demo;
+    s.usage = d.usage && typeof d.usage === 'object' ? { month: String(d.usage.month || ''), ai: Number(d.usage.ai) || 0 } : s.usage;
+    s.settings = Object.assign(defaultSettings(), d.settings || {});
+    if (!d.v && (s.tx.length || s.chat.length || s.tasks.length || s.habits.length)) s.settings.onboarded = true;
+
+    s.tx = s.tx.filter((t) => t && Number.isFinite(Number(t.amount)) && isYmd(t.date)).map((t) => ({
+      id: t.id || uid(), type: t.type === 'in' ? 'in' : 'out', amount: Math.abs(Number(t.amount)),
+      desc: String(t.desc || 'Lançamento'), cat: t.cat || 'Outros', scope: t.scope === 'empresa' ? 'empresa' : 'pessoal',
+      date: t.date, auto: !!t.auto, subId: t.subId || null,
+    }));
+    s.goals = s.goals.filter((g) => g && g.name).map((g) => ({ id: g.id || uid(), name: String(g.name), target: Number(g.target) || 0, saved: Number(g.saved) || 0 }));
+    s.subs = s.subs.filter((x) => x && x.name).map((x) => {
+      const day = Math.min(31, Math.max(1, Number(x.day) || 1));
+      return {
+        id: x.id || uid(), name: String(x.name), amount: Number(x.amount) || 0, day,
+        cat: x.cat || 'Assinaturas', scope: x.scope === 'empresa' ? 'empresa' : 'pessoal',
+        autoPost: x.autoPost !== false, lastPosted: x.lastPosted || initialLastPosted(day),
+      };
+    });
+    s.habits = s.habits.filter((h) => h && h.name).map((h) => ({ id: h.id || uid(), name: String(h.name), days: h.days && typeof h.days === 'object' ? h.days : {}, created: h.created || today() }));
+    s.tasks = s.tasks.filter((t) => t && t.title).map((t) => ({
+      id: t.id || uid(), title: String(t.title), prio: ['alta', 'media', 'baixa'].includes(t.prio) ? t.prio : 'media',
+      due: isYmd(t.due) ? t.due : '', time: /^\d{2}:\d{2}$/.test(t.time || '') ? t.time : '', done: !!t.done, doneAt: t.doneAt || null,
+    }));
+    s.chat = s.chat.filter((m) => m && typeof m.text === 'string').slice(-200).map((m) => ({
+      id: m.id || uid(), role: m.role === 'user' ? 'user' : 'bot', text: m.text, at: m.at || Date.now(),
+      chips: Array.isArray(m.chips) ? m.chips.map((c) => (typeof c === 'string' ? { icon: 'check', label: c } : c)) : [],
+      undoId: m.undoId || null, undone: !!m.undone,
+    }));
+    s.v = 2;
+    return s;
+  }
+
+  function load() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (raw) return migrate(JSON.parse(raw));
+    } catch (e) { /* armazenamento indisponível ou corrompido */ }
+    return defaults();
+  }
+  let saveWarned = false;
+  function save() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) {
+      if (!saveWarned) { saveWarned = true; toast('Não consegui salvar neste navegador. Seus dados valem só até fechar a página.'); }
+    }
+  }
+
+  let S = load();
+
+  // ---------- Alterações com "desfazer" ----------
+  const undoStack = [];
+  const snapshot = () => JSON.stringify({ tx: S.tx, goals: S.goals, subs: S.subs, habits: S.habits, tasks: S.tasks, budget: S.settings.budget });
+  function commit(fn) {
+    const snap = snapshot();
+    const result = fn();
+    const id = uid();
+    undoStack.push({ id, snap });
+    if (undoStack.length > 40) undoStack.shift();
+    save();
+    renderAll();
+    return { id, result };
+  }
+  function undo(id) {
+    const top = undoStack[undoStack.length - 1];
+    if (!top || (id && top.id !== id)) { toast('Só dá para desfazer a última alteração.'); return false; }
+    undoStack.pop();
+    const snap = JSON.parse(top.snap);
+    Object.assign(S, { tx: snap.tx, goals: snap.goals, subs: snap.subs, habits: snap.habits, tasks: snap.tasks });
+    S.settings.budget = snap.budget;
+    S.chat.forEach((m) => { if (m.undoId === top.id) m.undone = true; });
+    save(); renderAll(); renderChat();
+    toast('Alteração desfeita');
+    return true;
+  }
+  const undoToast = (msg, id) => toast(msg, { label: 'Desfazer', fn: () => undo(id) });
+
+  // ---------- Consultas ----------
+  function monthTx(y, m, scope = 'all') {
+    const key = `${y}-${pad(m + 1)}`;
+    return S.tx.filter((t) => t.date.startsWith(key) && (scope === 'all' || t.scope === scope));
+  }
+  function totals(list) {
+    const inc = sum(list.filter((t) => t.type === 'in'));
+    const out = sum(list.filter((t) => t.type === 'out'));
+    return { inc, out, bal: inc - out };
+  }
+  function byCat(list) {
+    const m = {};
+    list.filter((t) => t.type === 'out').forEach((t) => { m[t.cat] = (m[t.cat] || 0) + t.amount; });
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+  }
+  function streak(h) {
+    let n = 0, d = new Date();
+    if (!h.days[ymd(d)]) d = addDays(d, -1);
+    while (h.days[ymd(d)]) { n++; d = addDays(d, -1); }
+    return n;
+  }
+  function bestStreak(h) {
+    const keys = Object.keys(h.days).filter((k) => h.days[k]).sort();
+    let best = 0, run = 0, prev = null;
+    for (const k of keys) {
+      run = prev && ymd(addDays(parseYmd(prev), 1)) === k ? run + 1 : 1;
+      best = Math.max(best, run);
+      prev = k;
+    }
+    return best;
+  }
+  function daysUntil(day) {
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth();
+    const thisMonth = Math.min(day, daysInMonth(y, m));
+    if (thisMonth >= now.getDate()) return thisMonth - now.getDate();
+    const next = new Date(y, m + 1, Math.min(day, daysInMonth(y, m + 1)));
+    return Math.round((next - parseYmd(today())) / 86400000);
+  }
+  const PRIO_ORDER = { alta: 0, media: 1, baixa: 2 };
+  function sortTasks(a, b) {
+    return (a.due || '9999').localeCompare(b.due || '9999') || (a.time || '99').localeCompare(b.time || '99') || PRIO_ORDER[a.prio] - PRIO_ORDER[b.prio];
+  }
   function findByName(list, name, key = 'name') {
     const n = norm(name).trim();
     if (!n) return null;
@@ -92,121 +253,140 @@
     return bestScore > 0 ? best : null;
   }
 
+  // ---------- Ações (compartilhadas entre IA, interpretador local e formulários) ----------
   function applyActions(actions) {
     const chips = [];
-    for (const a of actions || []) {
-      try {
-        switch (a.type) {
-          case 'add_transaction': {
-            const amount = Math.abs(Number(a.amount));
-            if (!amount) break;
-            const type = a.kind === 'in' || a.transaction_type === 'in' || a.direction === 'in' ? 'in' : 'out';
-            const desc = a.description || a.category || 'Lançamento';
-            S.tx.push({
-              id: uid(), type, amount, desc: cap(desc),
-              cat: a.category || guessCat(desc, type),
-              scope: a.scope === 'empresa' ? 'empresa' : 'pessoal',
-              date: /^\d{4}-\d{2}-\d{2}$/.test(a.date || '') ? a.date : today(),
-            });
-            chips.push(`${type === 'in' ? '💵 +' : '💸 −'}${money(amount)} · ${cap(desc)}`);
-            break;
-          }
-          case 'add_task': {
-            if (!a.title) break;
-            S.tasks.push({
-              id: uid(), title: cap(a.title), prio: ['alta', 'media', 'baixa'].includes(a.priority) ? a.priority : 'media',
-              due: /^\d{4}-\d{2}-\d{2}$/.test(a.due || '') ? a.due : '', time: a.time || '', done: false,
-            });
-            chips.push(`📝 ${cap(a.title)}${a.due ? ' · ' + fmtDate(a.due) : ''}`);
-            break;
-          }
-          case 'complete_task': {
-            const t = findByName(S.tasks.filter((x) => !x.done), a.title, 'title');
-            if (t) { t.done = true; t.doneAt = today(); chips.push(`✅ ${t.title}`); }
-            break;
-          }
-          case 'add_habit': {
-            if (!a.name || S.habits.some((h) => norm(h.name) === norm(a.name))) break;
-            S.habits.push({ id: uid(), name: cap(a.name), days: {} });
-            chips.push(`🔥 Novo hábito: ${cap(a.name)}`);
-            break;
-          }
-          case 'check_habit': {
-            const h = findByName(S.habits, a.name);
-            if (h) { h.days[a.date || today()] = true; chips.push(`🔥 ${h.name} · ${streak(h)} dia(s) seguidos`); }
-            break;
-          }
-          case 'add_goal': {
-            if (!a.name || !Number(a.target)) break;
-            S.goals.push({ id: uid(), name: cap(a.name), target: Number(a.target), saved: Number(a.saved) || 0 });
-            chips.push(`🎯 Meta: ${cap(a.name)} · ${money(Number(a.target))}`);
-            break;
-          }
-          case 'add_to_goal': {
-            const g = findByName(S.goals, a.name) || (S.goals.length === 1 ? S.goals[0] : null);
-            if (g && Number(a.amount)) { g.saved += Number(a.amount); chips.push(`🎯 ${g.name}: ${money(g.saved)} de ${money(g.target)}`); }
-            break;
-          }
-          case 'add_subscription': {
-            if (!a.name || !Number(a.amount)) break;
-            S.subs.push({ id: uid(), name: cap(a.name), amount: Number(a.amount), day: Number(a.day) || new Date().getDate() });
-            chips.push(`🔁 ${cap(a.name)} · ${money(Number(a.amount))}/mês`);
-            break;
-          }
-        }
-      } catch (e) { console.warn('Ação ignorada', a, e); }
-    }
-    save();
-    renderAll();
-    return chips;
-  }
-
-  // ---------- Consultas ----------
-  function monthTx(y, m, scope = 'all') {
-    return S.tx.filter((t) => {
-      const d = parseYmd(t.date);
-      return d.getFullYear() === y && d.getMonth() === m && (scope === 'all' || t.scope === scope);
+    const gates = [];
+    const { id } = commit(() => {
+      for (const a of actions || []) {
+        try { applyOne(a, chips, gates); } catch (e) { console.warn('Ação ignorada', a, e); }
+      }
     });
-  }
-  function totals(list) {
-    const inc = list.filter((t) => t.type === 'in').reduce((s, t) => s + t.amount, 0);
-    const out = list.filter((t) => t.type === 'out').reduce((s, t) => s + t.amount, 0);
-    return { inc, out, bal: inc - out };
-  }
-  function byCat(list) {
-    const m = {};
-    list.filter((t) => t.type === 'out').forEach((t) => { m[t.cat] = (m[t.cat] || 0) + t.amount; });
-    return Object.entries(m).sort((a, b) => b[1] - a[1]);
-  }
-  function streak(h) {
-    let n = 0, d = new Date();
-    if (!h.days[ymd(d)]) d = addDays(d, -1);
-    while (h.days[ymd(d)]) { n++; d = addDays(d, -1); }
-    return n;
+    if (gates.length) gate(gates[0]);
+    return { chips, undoId: chips.length ? id : null };
   }
 
+  function applyOne(a, chips, gates) {
+    switch (a && a.type) {
+      case 'add_transaction': {
+        const amount = Math.abs(Number(a.amount));
+        if (!amount) return;
+        const type = [a.kind, a.transaction_type, a.direction, a.tipo].includes('in') ? 'in' : 'out';
+        const desc = cap(String(a.description || a.category || 'Lançamento').trim().slice(0, 80));
+        let scope = a.scope === 'empresa' ? 'empresa' : 'pessoal';
+        if (scope === 'empresa' && !allowed('business')) { scope = 'pessoal'; gates.push(`Contas da empresa fazem parte do plano ${planWith('business')?.name || 'superior'}.`); }
+        S.tx.push({
+          id: uid(), type, amount, desc,
+          cat: CATS[a.category] ? a.category : guessCat(desc + ' ' + (a.category || ''), type),
+          scope, date: isYmd(a.date) ? a.date : today(), auto: false, subId: null,
+        });
+        chips.push({ icon: type === 'in' ? 'in' : 'out', tone: type, label: `${type === 'in' ? '+' : '−'} ${money(amount)} · ${desc}` });
+        return;
+      }
+      case 'add_task': {
+        const title = cap(String(a.title || '').trim().slice(0, 120));
+        if (!title) return;
+        const due = isYmd(a.due) ? a.due : '';
+        S.tasks.push({ id: uid(), title, prio: ['alta', 'media', 'baixa'].includes(a.priority) ? a.priority : 'media', due, time: /^\d{2}:\d{2}$/.test(a.time || '') ? a.time : '', done: false, doneAt: null });
+        chips.push({ icon: 'tasks', tone: 'info', label: `${title}${due ? ' · ' + fmtDate(due) : ''}${a.time ? ' ' + a.time : ''}` });
+        return;
+      }
+      case 'complete_task': {
+        const t = findByName(S.tasks.filter((x) => !x.done), a.title, 'title');
+        if (t) { t.done = true; t.doneAt = today(); chips.push({ icon: 'check', tone: 'in', label: t.title }); }
+        return;
+      }
+      case 'add_habit': {
+        const name = cap(String(a.name || '').trim().slice(0, 60));
+        if (!name || S.habits.some((h) => norm(h.name) === norm(name))) return;
+        if (!underLimit('habits', S.habits.length)) { gates.push(`Seu plano permite até ${limitOf('habits')} hábitos.`); return; }
+        S.habits.push({ id: uid(), name, days: {}, created: today() });
+        chips.push({ icon: 'flame', tone: 'amber', label: `Novo hábito: ${name}` });
+        return;
+      }
+      case 'check_habit': {
+        const h = findByName(S.habits, a.name);
+        const day = isYmd(a.date) && a.date <= today() ? a.date : today();
+        if (h) { h.days[day] = true; chips.push({ icon: 'flame', tone: 'amber', label: `${h.name} · ${plural(streak(h), 'dia seguido', 'dias seguidos')}` }); }
+        return;
+      }
+      case 'add_goal': {
+        const name = cap(String(a.name || '').trim().slice(0, 60));
+        const target = Math.abs(Number(a.target));
+        if (!name || !target) return;
+        if (!underLimit('goals', S.goals.length)) { gates.push(`Seu plano permite até ${limitOf('goals')} meta(s).`); return; }
+        S.goals.push({ id: uid(), name, target, saved: Math.abs(Number(a.saved)) || 0 });
+        chips.push({ icon: 'target', tone: 'accent', label: `Meta: ${name} · ${money(target)}` });
+        return;
+      }
+      case 'add_to_goal': {
+        const g = findByName(S.goals, a.name) || (S.goals.length === 1 ? S.goals[0] : null);
+        const amount = Number(a.amount);
+        if (g && amount) { g.saved = Math.max(0, g.saved + amount); chips.push({ icon: 'target', tone: 'accent', label: `${g.name}: ${money(g.saved)} de ${money(g.target)}` }); }
+        return;
+      }
+      case 'add_subscription': {
+        const name = cap(String(a.name || '').trim().slice(0, 60));
+        const amount = Math.abs(Number(a.amount));
+        if (!name || !amount) return;
+        const day = Math.min(31, Math.max(1, Number(a.day) || new Date().getDate()));
+        S.subs.push({ id: uid(), name, amount, day, cat: 'Assinaturas', scope: 'pessoal', autoPost: true, lastPosted: initialLastPosted(day) });
+        chips.push({ icon: 'repeat', tone: 'info', label: `${name} · ${money(amount)} todo dia ${day}` });
+        return;
+      }
+      case 'set_budget': {
+        const amount = Math.abs(Number(a.amount));
+        if (!amount) return;
+        S.settings.budget = amount;
+        chips.push({ icon: 'wallet', tone: 'accent', label: `Orçamento: ${money(amount)} por mês` });
+        return;
+      }
+    }
+  }
+
+  // Assinaturas viram lançamentos automaticamente no dia da cobrança.
+  function postSubscriptions() {
+    if (!allowed('autoSubs')) return false;
+    const now = new Date();
+    const key = monthKey(now);
+    let changed = false;
+    for (const s of S.subs) {
+      if (s.autoPost === false || s.lastPosted === key) continue;
+      const day = Math.min(s.day, daysInMonth(now.getFullYear(), now.getMonth()));
+      if (now.getDate() < day) continue;
+      S.tx.push({ id: uid(), type: 'out', amount: s.amount, desc: s.name, cat: s.cat || 'Assinaturas', scope: s.scope || 'pessoal', date: ymd(new Date(now.getFullYear(), now.getMonth(), day)), auto: true, subId: s.id });
+      s.lastPosted = key;
+      changed = true;
+    }
+    if (changed) save();
+    return changed;
+  }
+
+  // ---------- Resumos em texto ----------
   function financeSummary() {
     const now = new Date();
     const list = monthTx(now.getFullYear(), now.getMonth());
     const t = totals(list);
     const cats = byCat(list).slice(0, 3).map(([c, v]) => `• ${c}: ${money(v)}`).join('\n');
-    const subs = S.subs.reduce((s, x) => s + x.amount, 0);
-    return `Neste mês:\nEntradas: ${money(t.inc)}\nSaídas: ${money(t.out)}\nSaldo: ${money(t.bal)}` +
-      (cats ? `\n\nOnde mais gastou:\n${cats}` : '') +
-      (subs ? `\n\nAssinaturas: ${money(subs)}/mês` : '');
+    const budget = Number(S.settings.budget) || 0;
+    return `**${cap(monthName(now.getFullYear(), now.getMonth()))} até agora**\n• Entradas: ${money(t.inc)}\n• Saídas: ${money(t.out)}\n• Saldo: ${money(t.bal)}` +
+      (budget ? `\n\nVocê usou ${Math.round((t.out / budget) * 100)}% do orçamento de ${money(budget)}.` : '') +
+      (cats ? `\n\n**Onde mais gastou**\n${cats}` : '');
   }
   function tasksSummary() {
     const open = S.tasks.filter((t) => !t.done).sort(sortTasks);
-    if (!open.length) return 'Você não tem tarefas pendentes. 🎉';
-    return `Você tem ${open.length} tarefa(s) pendente(s):\n` +
-      open.slice(0, 8).map((t) => `• ${t.title}${t.due ? ` (${fmtDate(t.due)}${t.time ? ' ' + t.time : ''})` : ''}${t.prio === 'alta' ? ' ❗' : ''}`).join('\n');
+    if (!open.length) return 'Você não tem tarefas pendentes. Tudo em dia!';
+    return `Você tem ${plural(open.length, 'tarefa pendente', 'tarefas pendentes')}:\n` +
+      open.slice(0, 8).map((t) => `• ${t.title}${t.due ? ` (${fmtDate(t.due)}${t.time ? ' às ' + t.time : ''})` : ''}${t.prio === 'alta' ? ' **urgente**' : ''}`).join('\n');
   }
   function habitsSummary() {
     if (!S.habits.length) return 'Você ainda não tem hábitos. Diga, por exemplo: "criar hábito ler 10 páginas".';
-    return 'Seus hábitos hoje:\n' + S.habits.map((h) => `${h.days[today()] ? '✅' : '⬜'} ${h.name} — 🔥 ${streak(h)}`).join('\n');
+    const done = S.habits.filter((h) => h.days[today()]).length;
+    return `Hoje você fez ${done} de ${S.habits.length}:\n` + S.habits.map((h) => `• ${h.days[today()] ? 'Feito' : 'Falta'}: ${h.name} (${plural(streak(h), 'dia seguido', 'dias seguidos')})`).join('\n');
   }
+  const HELP = 'Você pode me dizer coisas como:\n• "Gastei 35 no almoço"\n• "Recebi 1200 de um cliente da empresa"\n• "Me lembra de ligar pro dentista amanhã às 10h"\n• "Criar hábito ler 10 páginas" e depois "li 10 páginas"\n• "Meta de juntar 5000 para viagem"\n• "Assinatura Netflix 55 dia 10"\n• "Orçamento de 3000 por mês"\n• "Quanto gastei este mês?"';
 
-  // ---------- Parser local (português) ----------
+  // ---------- Interpretador local (português) ----------
   const AMOUNT_RE = /(?:r\$\s*)?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)(\s*(?:mil|k)\b)?(\s*(?:reais|real|conto|pila))?/i;
   function parseAmount(text) {
     const m = text.match(AMOUNT_RE);
@@ -222,7 +402,8 @@
   const WEEKDAYS = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
   function parseDue(t) {
     const now = new Date();
-    let due = '', time = '', rawParts = [];
+    let due = '', time = '';
+    const rawParts = [];
     const tm = t.match(/\b(?:as|a)\s*(\d{1,2})(?:[:h](\d{2}))?\s*(?:h|horas)?\b/);
     if (tm && Number(tm[1]) < 24) { time = `${pad(tm[1])}:${tm[2] || '00'}`; rawParts.push(tm[0]); }
     if (/depois de amanha/.test(t)) { due = ymd(addDays(now, 2)); rawParts.push('depois de amanha'); }
@@ -244,10 +425,9 @@
     }
     if (!due) {
       for (let i = 0; i < 7; i++) {
-        const re = new RegExp(`\\b(na |no |nesta |neste |proxima |proximo )?${WEEKDAYS[i]}(-feira)?\\b`);
-        const m = t.match(re);
+        const m = t.match(new RegExp(`\\b(na |no |nesta |neste |proxima |proximo )?${WEEKDAYS[i]}(-feira)?\\b`));
         if (m) {
-          let diff = (i - now.getDay() + 7) % 7 || 7;
+          const diff = (i - now.getDay() + 7) % 7 || 7;
           due = ymd(addDays(now, diff)); rawParts.push(m[0]);
           break;
         }
@@ -261,17 +441,20 @@
     for (const w of words) s = s.replace(new RegExp(`\\s${w}(?=\\s)`, 'gi'), ' ');
     return s.replace(/\s+/g, ' ').trim();
   }
+  const STOP_MONEY = ['gastei', 'paguei', 'comprei', 'recebi', 'ganhei', 'vendi', 'entrou', 'caiu', 'torrei', 'me', 'pagaram', 'hoje', 'ontem', 'amanha', 'amanhã', 'com', 'no', 'na', 'nos', 'nas', 'de', 'do', 'da', 'em', 'pra', 'para', 'o', 'a', 'os', 'as', 'um', 'uma', 'reais', 'real', 'r\\$', 'eu', 'foi', 'pela', 'pelo', 'empresa', 'pessoal', 'mais', 'uns', 'umas', 'e'];
+  const UNDO_RE = /^(desfaz(er)?|desfaca|cancela(r)?( isso)?|apaga (o|a) ultim[oa]|volta(r)?)\b/;
 
-  function localParse(input) {
-    input = input.normalize('NFC').replace(/[!?.]+$/g, '').trim();
+  function localParse(rawInput) {
+    const input = String(rawInput).normalize('NFC').replace(/[!?.]+$/g, '').trim();
     const t = norm(input); // mesmo tamanho do input: índices batem para recuperar acentos
     const orig = (frag) => { const i = t.indexOf(frag); return i >= 0 ? input.slice(i, i + frag.length) : frag; };
     const amt = parseAmount(t);
+    const name = S.settings.userName;
 
-    // Saudações e ajuda
     if (/^(oi|ola|e ai|bom dia|boa tarde|boa noite|hey|opa)\b/.test(t) && t.split(' ').length <= 4) {
-      return { reply: `${greeting()}${S.settings.userName ? ', ' + S.settings.userName : ''}! Como posso ajudar? Pode me contar um gasto, pedir um lembrete ou marcar um hábito.` };
+      return { reply: `${greeting()}${name ? ', ' + name : ''}! Como posso ajudar? Pode me contar um gasto, pedir um lembrete ou marcar um hábito.` };
     }
+    if (/\b(obrigad[oa]|valeu|brigad[oa])\b/.test(t)) return { reply: 'Por nada! Estou aqui quando precisar.' };
     if (/\b(ajuda|o que voce faz|como funciona|comandos)\b/.test(t)) return { reply: HELP };
 
     // Consultas
@@ -279,39 +462,44 @@
     if (/\b(minhas tarefas|quais (sao as )?tarefas|o que (eu )?(tenho|preciso) (pra|para|que) fazer|tarefas pendentes|lista de tarefas|minha agenda)\b/.test(t)) return { reply: tasksSummary() };
     if (/\b(meus habitos|como estao (meus )?habitos|habitos de hoje)\b/.test(t)) return { reply: habitsSummary() };
     if (/\b(minhas metas|como estao (minhas )?metas)\b/.test(t)) {
-      return { reply: S.goals.length ? S.goals.map((g) => `🎯 ${g.name}: ${money(g.saved)} de ${money(g.target)} (${Math.round((g.saved / g.target) * 100)}%)`).join('\n') : 'Nenhuma meta ainda. Ex.: "meta de juntar 3000 para viagem".' };
+      return { reply: S.goals.length ? S.goals.map((g) => `• ${g.name}: ${money(g.saved)} de ${money(g.target)} (${Math.round((g.saved / (g.target || 1)) * 100)}%)`).join('\n') : 'Nenhuma meta ainda. Ex.: "meta de juntar 3000 para viagem".' };
+    }
+
+    // Orçamento
+    if (/\b(orcamento|limite de gastos?|limite mensal)\b/.test(t) && amt) {
+      return { actions: [{ type: 'set_budget', amount: amt.value }], reply: `Combinado. Vou te avisar quando os gastos chegarem perto de ${money(amt.value)} no mês.` };
     }
 
     // Assinaturas
     if (/\b(assinatura|mensalidade|assinei)\b/.test(t) && amt) {
       const day = (t.match(/\bdia\s+(\d{1,2})\b/) || [])[1];
-      const name = stripWords(orig(t).toLowerCase().replace(amt.raw, '').replace(/\bdia\s+\d{1,2}\b/, ''), ['assinatura', 'mensalidade', 'assinei', 'nova', 'do', 'da', 'de', 'o', 'a', 'por', 'mes', 'mensal', 'todo', 'cobrada', 'no', 'na']) || 'Assinatura';
-      return { actions: [{ type: 'add_subscription', name, amount: amt.value, day }], reply: `Assinatura registrada. Vou considerar ${money(amt.value)} todo mês.` };
+      const subName = stripWords(orig(t).toLowerCase().replace(amt.raw, '').replace(/\bdia\s+\d{1,2}\b/, ''), ['assinatura', 'mensalidade', 'assinei', 'nova', 'do', 'da', 'de', 'o', 'a', 'por', 'mes', 'mês', 'mensal', 'todo', 'cobrada', 'no', 'na']) || 'Assinatura';
+      return { actions: [{ type: 'add_subscription', name: subName, amount: amt.value, day }], reply: `Assinatura registrada. Vou considerar ${money(amt.value)} todo mês.` };
     }
 
     // Metas
     if (/\bmeta\b/.test(t) && amt && /\b(criar|nova|meta de|quero|juntar|guardar|economizar)\b/.test(t) && !/\b(guardei|economizei|poupei|depositei)\b/.test(t)) {
       const nm = (t.match(/\b(?:para|pra|p\/)\s+(?:o |a |uma? )?(.+)$/) || [])[1];
-      const name = nm ? orig(nm).replace(amt.raw, '').trim() : 'Minha meta';
-      return { actions: [{ type: 'add_goal', name, target: amt.value }], reply: `Meta criada! Me avise quando guardar dinheiro, ex.: "guardei 100 para ${name}".` };
+      const goalName = nm ? orig(nm).replace(amt.raw, '').trim() : 'Minha meta';
+      return { actions: [{ type: 'add_goal', name: goalName, target: amt.value }], reply: `Meta criada! Quando guardar dinheiro, me diga: "guardei 100 para ${goalName}".` };
     }
     if (/\b(guardei|economizei|poupei|depositei|separei)\b/.test(t) && amt) {
       const g = S.goals.find((x) => t.includes(norm(x.name))) || findByName(S.goals, t.replace(amt.raw, '')) || (S.goals.length === 1 ? S.goals[0] : null);
-      if (g) return { actions: [{ type: 'add_to_goal', name: g.name, amount: amt.value }], reply: 'Boa! Cada passo conta. 💪' };
-      return { reply: 'Anotei mentalmente, mas você ainda não tem uma meta com esse nome. Crie uma: "meta de juntar 2000 para reserva".' };
+      if (g) return { actions: [{ type: 'add_to_goal', name: g.name, amount: amt.value }], reply: 'Boa! Cada passo conta.' };
+      return { reply: 'Você ainda não tem uma meta com esse nome. Crie uma assim: "meta de juntar 2000 para reserva".' };
     }
 
     // Criar hábito
     const hm = t.match(/\b(?:criar|novo|nova|adicionar|comecar)\s+(?:o\s+|um\s+)?(?:habito|rotina)\s+(?:de\s+)?(.+)$/) || t.match(/^(?:habito|rotina)[:\s]+(?:de\s+)?(.+)$/) || t.match(/\bquero criar o habito de\s+(.+)$/);
-    if (hm) return { actions: [{ type: 'add_habit', name: orig(hm[1]) }], reply: 'Hábito criado! Me diga quando fizer, ex.: "fiz ' + orig(hm[1]) + '". Vou acompanhar sua sequência. 🔥' };
+    if (hm) return { actions: [{ type: 'add_habit', name: orig(hm[1]) }], reply: `Hábito criado! Quando fizer, é só me dizer "fiz ${orig(hm[1])}". Vou acompanhar sua sequência.` };
 
-    // Concluir hábito / tarefa
+    // Concluir hábito ou tarefa
     const doneVerb = /\b(fiz|feito|feita|conclui|terminei|completei|marquei|marca|marcar|ja|finalizei|resolvi|bebi|li|treinei|meditei|corri|estudei|caminhei)\b/.test(t);
     if (doneVerb) {
       const h = S.habits.find((x) => t.includes(norm(x.name))) || (S.habits.length ? findByName(S.habits, stripWords(t, ['fiz', 'feito', 'marquei', 'marca', 'hoje', 'ja', 'o', 'a', 'habito', 'de'])) : null);
       const tk = findByName(S.tasks.filter((x) => !x.done), stripWords(t, ['conclui', 'terminei', 'finalizei', 'resolvi', 'fiz', 'feito', 'feita', 'a', 'o', 'tarefa', 'de', 'ja']), 'title');
       if (h && !/\btarefa\b/.test(t)) return { actions: [{ type: 'check_habit', name: h.name }], reply: 'Mandou bem! Hábito marcado para hoje.' };
-      if (tk && !amt) return { actions: [{ type: 'complete_task', title: tk.title }], reply: 'Tarefa concluída. Menos uma! ✅' };
+      if (tk && !amt) return { actions: [{ type: 'complete_task', title: tk.title }], reply: 'Tarefa concluída. Menos uma!' };
     }
 
     // Dinheiro
@@ -330,13 +518,13 @@
         const desc = stripWords(orig(seg).toLowerCase().replace(a.raw, ''), STOP_MONEY) || guessCat(seg, type);
         return { type: 'add_transaction', kind: type, amount: a.value, description: desc, category: guessCat(seg, type), scope: guessScope(t), date };
       });
-      return { actions, reply: () => (type === 'in' ? 'Entrada registrada! 💵' : 'Gasto registrado. ' + budgetHint()) };
+      return { actions, reply: () => (type === 'in' ? 'Entrada registrada!' : 'Gasto registrado. ' + budgetHint()) };
     }
 
     // Tarefas
     if (taskHint || /\b(me lembra|agendar|marcar consulta|ligar para|ligar pra|comprar|pagar|enviar|mandar|buscar|levar)\b/.test(t)) {
       const { due, time, rawParts } = parseDue(t);
-      let title = input.trim();
+      let title = input;
       let n = norm(title);
       const prefixes = /^(me\s+lembr[ae]\s+(de\s+)?|lembr[ae]r?(-me)?\s+(de\s+|que\s+)?|lembrete[:\s]+(de\s+|para\s+)?|nova\s+tarefa[:\s]+|tarefa[:\s]+|adicionar\s+tarefa[:\s]+|preciso\s+(de\s+)?|tenho\s+que\s+|nao\s+(posso\s+)?esquecer\s+(de\s+)?|nao\s+deixar\s+de\s+)/;
       const pm = n.match(prefixes);
@@ -350,28 +538,50 @@
       if (title) {
         return {
           actions: [{ type: 'add_task', title, priority: prio, due, time }],
-          reply: `Pode deixar, vou te lembrar${due ? ' ' + fmtDate(due) : ''}${time ? ' às ' + time : ''}. 📝`,
+          reply: `Pode deixar, vou te lembrar${due ? ' ' + fmtDate(due) : ''}${time ? ' às ' + time : ''}.`,
         };
       }
     }
 
-    if (amt) return { reply: `Entendi o valor ${money(amt.value)}, mas foi um gasto ou uma entrada? Ex.: "gastei ${amt.value} no mercado" ou "recebi ${amt.value}".` };
-    return { reply: 'Não entendi muito bem. 🤔\n' + HELP + (serverUrl() ? '' : '\n\nDica: conecte o servidor da IA em Ajustes para conversar livremente.') };
+    if (amt) return { reply: `Entendi o valor de ${money(amt.value)}, mas foi um gasto ou uma entrada? Ex.: "gastei ${amt.value} no mercado" ou "recebi ${amt.value}".` };
+    return { reply: 'Não entendi muito bem.\n' + HELP };
   }
-
-  const STOP_MONEY = ['gastei', 'paguei', 'comprei', 'recebi', 'ganhei', 'vendi', 'entrou', 'caiu', 'torrei', 'me', 'pagaram', 'hoje', 'ontem', 'amanha', 'amanhã', 'com', 'no', 'na', 'nos', 'nas', 'de', 'do', 'da', 'em', 'pra', 'para', 'o', 'a', 'os', 'as', 'um', 'uma', 'reais', 'real', 'r\\$', 'eu', 'foi', 'pela', 'pelo', 'empresa', 'pessoal', 'mais', 'uns', 'umas', 'e'];
   function budgetHint() {
     const now = new Date();
     const t = totals(monthTx(now.getFullYear(), now.getMonth()));
-    return `Total de gastos no mês: ${money(t.out)}.`;
+    const budget = Number(S.settings.budget) || 0;
+    if (!budget) return `Total de gastos no mês: ${money(t.out)}.`;
+    const left = budget - t.out;
+    return left >= 0 ? `Ainda restam ${money(left)} do seu orçamento do mês.` : `Atenção: você passou ${money(-left)} do orçamento do mês.`;
   }
-  function greeting() {
-    const h = new Date().getHours();
-    return h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
-  }
-  const HELP = 'Você pode me dizer coisas como:\n• "Gastei 35 no almoço"\n• "Recebi 1200 de um cliente da empresa"\n• "Me lembra de ligar pro dentista amanhã às 10h"\n• "Criar hábito ler 10 páginas" e depois "li 10 páginas"\n• "Meta de juntar 5000 para viagem"\n• "Assinatura Netflix 55 dia 10"\n• "Quanto gastei este mês?" / "Minhas tarefas"';
 
-  // ---------- IA (Claude) ----------
+  // ---------- IA ----------
+  // Mantenha estas regras em sincronia com server/src/index.js.
+  const AI_RULES = `Você é o Zeny, um assistente pessoal brasileiro, simpático e objetivo, que organiza finanças (pessoais e da empresa), hábitos e tarefas do usuário a partir de mensagens de texto ou voz transcrita.
+
+Responda SEMPRE e SOMENTE com um objeto JSON válido, sem markdown, no formato:
+{"reply": "texto curto em português para o usuário", "actions": [ ... ]}
+
+Ações disponíveis (use quantas forem necessárias, ou nenhuma):
+- {"type":"add_transaction","kind":"in"|"out","amount":number,"description":string,"category":string,"scope":"pessoal"|"empresa","date":"YYYY-MM-DD"}
+  Categorias: Alimentação, Transporte, Moradia, Saúde, Lazer, Educação, Compras, Assinaturas, Contas, Salário, Vendas, Outros, Outras receitas.
+- {"type":"add_task","title":string,"priority":"alta"|"media"|"baixa","due":"YYYY-MM-DD" ou "","time":"HH:MM" ou ""}
+- {"type":"complete_task","title":string}   (use o título exato de uma tarefa pendente)
+- {"type":"add_habit","name":string}
+- {"type":"check_habit","name":string,"date":"YYYY-MM-DD"}   (use o nome exato de um hábito existente)
+- {"type":"add_goal","name":string,"target":number}
+- {"type":"add_to_goal","name":string,"amount":number}
+- {"type":"add_subscription","name":string,"amount":number,"day":number}
+- {"type":"set_budget","amount":number}   (orçamento de gastos do mês)
+
+Regras:
+- Uma mensagem pode conter várias informações (ex.: "gastei 30 no uber e 50 no mercado" = 2 transações).
+- Calcule datas relativas (amanhã, sexta, dia 15) a partir da data de hoje do contexto.
+- Para perguntas (quanto gastei, o que tenho pra fazer, dicas), responda usando os dados do contexto, sem ações.
+- Se faltar informação essencial (ex.: valor), pergunte na "reply" e não crie a ação.
+- Respostas curtas e calorosas. Use R$ no formato brasileiro. Pode usar **negrito** e listas com "• ".
+- Você só ajuda com finanças pessoais, hábitos, tarefas e organização do dia a dia.`;
+
   function aiContext() {
     const now = new Date();
     const list = monthTx(now.getFullYear(), now.getMonth());
@@ -380,6 +590,7 @@
       hoje: today(),
       dia_da_semana: WEEKDAYS[now.getDay()],
       nome_usuario: S.settings.userName || null,
+      orcamento_mensal: Number(S.settings.budget) || null,
       mes_atual: { entradas: t.inc, saidas: t.out, saldo: t.bal, por_categoria: Object.fromEntries(byCat(list)) },
       lancamentos_recentes: S.tx.slice(-25).map(({ type, amount, desc, cat, scope, date }) => ({ tipo: type, valor: amount, desc, cat, scope, date })),
       metas: S.goals.map(({ name, target, saved }) => ({ name, target, saved })),
@@ -389,79 +600,198 @@
     });
   }
 
-  // URL do servidor: a dos Ajustes tem prioridade sobre a do config.js.
-  const serverUrl = () => (S.settings.serverUrl || (window.ZENY_CONFIG && window.ZENY_CONFIG.serverUrl) || '').replace(/\/+$/, '');
+  let sampleFn = null;
+  let sampleOff = false;
+  let downloadsApi = null;
+  const serverUrl = () => (S.settings.serverUrl || CFG.serverUrl || '').trim().replace(/\/+$/, '');
+  const aiMode = () => (sampleFn && !sampleOff ? 'claude' : serverUrl() ? 'server' : 'local');
+  const AI_LABEL = { claude: 'IA do Claude ativa', server: 'IA conectada', local: 'Modo local' };
 
-  // A chave da API fica só no servidor; o app manda a mensagem e o contexto.
-  async function askServer(userText) {
-    const history = S.chat.slice(-13, -1).map(({ role, text }) => ({ role, text }));
+  function normalizeAi(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw { code: 'invalid_json' };
+    return { reply: String(data.reply || ''), actions: Array.isArray(data.actions) ? data.actions : [] };
+  }
+  async function askSample(text) {
+    const turns = [{ role: 'user', content: AI_RULES }];
+    for (const m of S.chat.slice(-11, -1)) {
+      if (m.text) turns.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text.slice(0, 1500) });
+    }
+    turns.push({ role: 'user', content: `Contexto atual (JSON):\n${aiContext()}\n\nMensagem do usuário:\n${text}` });
+    return normalizeAi(await sampleFn.json(turns, { modelTier: 'quick', cache: false }));
+  }
+  async function askServer(text) {
+    const history = S.chat.slice(-13, -1).map(({ role, text: tx }) => ({ role, text: tx }));
     const res = await fetch(serverUrl() + '/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: userText, history, context: aiContext() }),
+      body: JSON.stringify({ message: text, history, context: aiContext() }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Servidor ${res.status}`);
-    return { reply: String(data.reply || ''), actions: Array.isArray(data.actions) ? data.actions : [] };
+    if (!res.ok) throw { code: res.status === 429 ? 'rate_limited' : 'upstream_error', message: data.error };
+    return normalizeAi(data);
+  }
+  function aiQuotaOk() {
+    const key = monthKey(new Date());
+    if (S.usage.month !== key) S.usage = { month: key, ai: 0 };
+    return underLimit('aiMessages', S.usage.ai);
+  }
+  function countAi() {
+    const key = monthKey(new Date());
+    if (S.usage.month !== key) S.usage = { month: key, ai: 0 };
+    S.usage.ai++;
+  }
+  function handleAiError(e, mode) {
+    const code = e && e.code;
+    if (mode === 'claude' && ['not_granted', 'sampling_disabled', 'not_declared', 'capability_disabled', 'capability_removed'].includes(code)) {
+      sampleOff = true;
+      renderAiStatus();
+      toast('A IA do Claude não foi liberada nesta página. Respondi no modo local.');
+    } else if (code === 'rate_limited') {
+      toast(e.message || 'Muitas mensagens seguidas. Respondi no modo local.');
+    } else {
+      console.warn('IA', e);
+      toast('A IA não respondeu agora. Respondi no modo local.');
+    }
   }
 
   // ---------- Chat ----------
-  function addMsg(role, text, chips = []) {
-    S.chat.push({ role, text, chips, at: Date.now() });
+  function formatText(text) {
+    const lines = esc(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').split('\n');
+    let html = '', list = [], para = [];
+    const flushP = () => { if (para.length) { html += `<p>${para.join('<br>')}</p>`; para = []; } };
+    const flushL = () => { if (list.length) { html += `<ul>${list.map((l) => `<li><span>${l}</span></li>`).join('')}</ul>`; list = []; } };
+    for (const line of lines) {
+      const m = line.match(/^\s*(?:•|-|\*)\s+(.*)$/);
+      if (m) { flushP(); list.push(m[1]); } else if (!line.trim()) { flushP(); flushL(); } else { flushL(); para.push(line); }
+    }
+    flushP(); flushL();
+    return html;
+  }
+
+  function msgHtml(m) {
+    const receipt = m.chips && m.chips.length ? `
+      <div class="receipt ${m.undone ? 'undone' : ''}">
+        ${m.chips.map((c) => `<div class="r-row"><span class="r-ic tone-${esc(c.tone || 'accent')}">${ic(c.icon || 'check')}</span><span>${esc(c.label)}</span></div>`).join('')}
+        ${m.undoId ? `<div class="r-foot">${m.undone ? '<span class="small muted">Desfeito</span>' : `<button type="button" data-act="undo" data-id="${esc(m.undoId)}">${ic('undo', 'sm')}Desfazer</button>`}</div>` : ''}
+      </div>` : '';
+    const bubble = m.role === 'user' ? `<div class="bubble">${esc(m.text).replace(/\n/g, '<br>')}</div>` : `<div class="bubble">${formatText(m.text)}</div>`;
+    return `${bubble}${receipt}<span class="time">${fmtTime(m.at)}</span>`;
+  }
+
+  function renderChat() {
+    const box = $('#messages');
+    let html = '', lastDay = '';
+    for (const m of S.chat) {
+      const d = ymd(new Date(m.at));
+      if (d !== lastDay) { html += `<div class="day-sep">${esc(dayLabel(d))}</div>`; lastDay = d; }
+      html += `<div class="msg ${m.role}" data-mid="${esc(m.id)}">${msgHtml(m)}</div>`;
+    }
+    box.innerHTML = html;
+    box.scrollTop = box.scrollHeight;
+  }
+  function addMsg(m) {
+    const msg = { id: uid(), at: Date.now(), chips: [], undoId: null, undone: false, ...m };
+    const prev = S.chat[S.chat.length - 1];
+    S.chat.push(msg);
     if (S.chat.length > 200) S.chat = S.chat.slice(-200);
     save();
-    drawMsg(S.chat[S.chat.length - 1]);
+    const box = $('#messages');
+    const d = ymd(new Date(msg.at));
+    if (!prev || ymd(new Date(prev.at)) !== d) box.insertAdjacentHTML('beforeend', `<div class="day-sep">${esc(dayLabel(d))}</div>`);
+    box.insertAdjacentHTML('beforeend', `<div class="msg ${msg.role} fresh" data-mid="${esc(msg.id)}">${msgHtml(msg)}</div>`);
+    box.scrollTop = box.scrollHeight;
+    return msg;
   }
-  function drawMsg(m) {
+  function showTyping() {
     const box = $('#messages');
     const el = document.createElement('div');
-    el.className = `msg ${m.role === 'user' ? 'user' : 'bot'}`;
-    el.innerHTML = esc(m.text) + (m.chips?.length ? `<div class="chips">${m.chips.map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</div>` : '');
+    el.className = 'msg bot fresh';
+    el.innerHTML = '<div class="bubble typing" aria-label="Zeny está digitando"><i></i><i></i><i></i></div>';
     box.appendChild(el);
     box.scrollTop = box.scrollHeight;
     return el;
   }
-  function renderChat() {
-    $('#messages').innerHTML = '';
-    S.chat.forEach(drawMsg);
+
+  function suggestionList() {
+    const s = [];
+    s.push(S.tx.length ? 'Quanto gastei este mês?' : 'Gastei 45 no mercado');
+    s.push('O que tenho pra fazer hoje?');
+    const pendingHabit = S.habits.find((h) => !h.days[today()]);
+    s.push(pendingHabit ? `Fiz ${pendingHabit.name.toLowerCase()}` : S.habits.length ? 'Meus hábitos' : 'Criar hábito beber água');
+    s.push('Me lembra de pagar a luz sexta');
+    if (!S.goals.length) s.push('Meta de juntar 5000 para viagem');
+    if (!S.settings.budget) s.push('Orçamento de 3000 por mês');
+    s.push('Recebi 2500 de salário');
+    return s.slice(0, 6);
+  }
+  function renderSuggestions() {
+    $('#suggestions').innerHTML = suggestionList().map((x) => `<button type="button" data-act="suggest">${esc(x)}</button>`).join('');
   }
 
   let busy = false;
-  async function handleUser(text) {
-    text = text.trim();
+  async function handleUser(raw) {
+    const text = String(raw || '').trim().slice(0, 2000);
     if (!text || busy) return;
     busy = true;
-    addMsg('user', text);
-    $('#suggestions').style.display = 'none';
-    let result;
-    if (serverUrl()) {
-      const typing = drawMsg({ role: 'bot', text: 'Zeny está pensando…' });
-      typing.classList.add('typing');
-      try {
-        result = await askServer(text);
-      } catch (e) {
-        console.error(e);
-        toast((e.message || 'IA indisponível') + ' — usando modo local');
-        result = localParse(text);
-      }
-      typing.remove();
-    } else {
-      result = localParse(text);
+    setComposer();
+    addMsg({ role: 'user', text });
+
+    if (UNDO_RE.test(norm(text))) {
+      const ok = undoStack.length ? undo() : false;
+      addMsg({ role: 'bot', text: ok ? 'Pronto, desfiz a última alteração.' : 'Não há nada para desfazer agora.' });
+      busy = false; setComposer();
+      return;
     }
-    const chips = applyActions(result.actions);
-    if (typeof result.reply === 'function') result.reply = result.reply();
-    addMsg('bot', result.reply || (chips.length ? 'Feito!' : '…'), chips);
-    speak(result.reply);
+
+    const typing = showTyping();
+    const started = Date.now();
+    const mode = aiMode();
+    let result = null;
+    try {
+      if (mode !== 'local') {
+        if (aiQuotaOk()) {
+          try {
+            result = mode === 'claude' ? await askSample(text) : await askServer(text);
+            countAi();
+          } catch (e) { handleAiError(e, mode); }
+        } else {
+          gate(`Você usou as ${limitOf('aiMessages')} mensagens com a IA do plano ${currentPlan().name} este mês.`);
+        }
+      }
+      if (!result) result = localParse(text);
+      const wait = 420 - (Date.now() - started);
+      if (wait > 0) await sleep(wait);
+    } catch (e) {
+      console.error(e);
+      result = { reply: 'Tive um problema para entender isso. Pode tentar de outro jeito?' };
+    } finally {
+      typing.remove();
+    }
+
+    const { chips, undoId } = result.actions && result.actions.length ? applyActions(result.actions) : { chips: [], undoId: null };
+    let reply = typeof result.reply === 'function' ? result.reply() : result.reply;
+    if (!reply) reply = chips.length ? 'Pronto, anotei.' : 'Certo.';
+    addMsg({ role: 'bot', text: reply, chips, undoId });
+    speak(reply);
     busy = false;
+    setComposer();
+    renderSuggestions();
   }
 
-  // No app Android (Capacitor) usamos plugins nativos; no navegador, a Web Speech API.
-  const native = () => window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform();
+  function setComposer() {
+    const input = $('#input');
+    $('#sendBtn').disabled = busy || !input.value.trim();
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+  }
+
+  // ---------- Voz ----------
+  const native = () => !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
   const plugin = (name) => native() && window.Capacitor.Plugins && window.Capacitor.Plugins[name];
 
   function speak(text) {
     if (!S.settings.speak || !text) return;
-    const clean = text.replace(/[•\u{1F300}-\u{1FAFF}\u2600-\u27BF]/gu, '');
+    const clean = text.replace(/\*\*/g, '').replace(/[•\u{1F300}-\u{1FAFF}☀-➿]/gu, '');
     const tts = plugin('TextToSpeech');
     if (tts) { tts.stop().catch(() => {}).finally(() => tts.speak({ text: clean, lang: 'pt-BR', rate: 1.0 }).catch(() => {})); return; }
     if (!('speechSynthesis' in window)) return;
@@ -471,7 +801,6 @@
     speechSynthesis.speak(u);
   }
 
-  // ---------- Voz ----------
   function setupVoice() {
     const btn = $('#micBtn');
     const nativeSR = plugin('SpeechRecognition');
@@ -481,9 +810,9 @@
         if (listening) { nativeSR.stop().catch(() => {}); return; }
         try {
           const { available } = await nativeSR.available();
-          if (!available) { toast('Reconhecimento de voz indisponível neste aparelho'); return; }
+          if (!available) { toast('Reconhecimento de voz indisponível neste aparelho.'); return; }
           const perm = await nativeSR.requestPermissions();
-          if (perm && perm.speechRecognition && perm.speechRecognition !== 'granted') { toast('Permita o uso do microfone'); return; }
+          if (perm && perm.speechRecognition && perm.speechRecognition !== 'granted') { toast('Permita o uso do microfone para falar com o Zeny.'); return; }
           listening = true; btn.classList.add('rec');
           const { matches } = await nativeSR.start({ language: 'pt-BR', maxResults: 1, partialResults: false, popup: false, prompt: 'Fale com o Zeny' });
           if (matches && matches[0]) handleUser(matches[0]);
@@ -498,19 +827,19 @@
 
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
-      btn.addEventListener('click', () => toast('Seu navegador não suporta voz. Tente o Chrome.'));
+      btn.addEventListener('click', () => toast('Seu navegador não reconhece voz. Use o Chrome ou digite a mensagem.'));
       return;
     }
     const rec = new SR();
     rec.lang = 'pt-BR';
     rec.interimResults = true;
     rec.continuous = false;
-    let listening = false, finalText = '';
+    let listening = false;
     rec.onresult = (e) => {
-      let interim = '';
-      finalText = '';
+      let interim = '', finalText = '';
       for (const r of e.results) (r.isFinal ? (finalText += r[0].transcript) : (interim += r[0].transcript));
       $('#input').value = finalText || interim;
+      setComposer();
     };
     rec.onend = () => {
       listening = false;
@@ -520,7 +849,7 @@
     };
     rec.onerror = (e) => {
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') toast('O microfone está bloqueado nesta página. Libere o acesso ou digite a mensagem.');
-      else if (e.error !== 'no-speech' && e.error !== 'aborted') toast('Erro no microfone: ' + e.error);
+      else if (e.error !== 'no-speech' && e.error !== 'aborted') toast('Não consegui usar o microfone agora.');
     };
     btn.addEventListener('click', () => {
       if (listening) { rec.stop(); return; }
@@ -529,263 +858,1062 @@
     });
   }
 
-  // ---------- Finanças ----------
+  // ---------- Navegação ----------
+  const VIEWS = ['home', 'finance', 'habits', 'tasks', 'plans', 'settings'];
+  let current = VIEWS.includes(S.settings.lastView) ? S.settings.lastView : 'home';
+  const isDesktop = () => window.matchMedia('(min-width: 1024px)').matches;
+
+  function go(view) {
+    const shell = $('#shell');
+    if (view === 'chat') {
+      shell.classList.add('chat-open');
+      setTimeout(() => { $('#messages').scrollTop = $('#messages').scrollHeight; if (isDesktop()) $('#input').focus(); }, 30);
+      return;
+    }
+    if (view === 'back') { shell.classList.remove('chat-open'); return; }
+    if (!VIEWS.includes(view)) return;
+    shell.classList.remove('chat-open');
+    current = view;
+    S.settings.lastView = view;
+    save();
+    renderMain();
+    $('#main').scrollTop = 0;
+  }
+
+  // ---------- Interface: pedaços reutilizáveis ----------
+  const emptyState = (icon, title, text, action = '') => `<div class="empty"><span class="e-ic">${ic(icon)}</span><strong>${title}</strong><span>${text}</span>${action}</div>`;
+  function ring(done, total) {
+    const c = 2 * Math.PI * 19;
+    const p = total ? done / total : 0;
+    return `<svg class="ring" viewBox="0 0 44 44" role="img" aria-label="${done} de ${total}"><circle class="track" cx="22" cy="22" r="19"/><circle class="val" cx="22" cy="22" r="19" stroke-dasharray="${(p * c).toFixed(1)} ${c.toFixed(1)}"/><text x="22" y="26" text-anchor="middle">${done}/${total}</text></svg>`;
+  }
+  function dueChip(t) {
+    if (!t.due) return '';
+    const overdue = !t.done && t.due < today();
+    const tone = overdue ? 'tone-out' : t.due === today() ? 'tone-accent' : '';
+    return `<span class="pill ${tone}">${ic(overdue ? 'alert' : 'clock')}${overdue ? 'Atrasada · ' : ''}${esc(cap(fmtDate(t.due)))}${t.time ? ' ' + esc(t.time) : ''}</span>`;
+  }
+  function taskRow(t) {
+    const prio = t.prio === 'alta' ? '<span class="pill tone-out">Alta</span>' : t.prio === 'baixa' ? '<span class="pill">Baixa</span>' : '';
+    const meta = [dueChip(t), prio, t.done && t.doneAt ? `<span>Concluída ${esc(fmtDate(t.doneAt))}</span>` : ''].filter(Boolean).join('');
+    return `<div class="row ${t.done ? 'done' : ''}">
+      <button type="button" class="checkbox ${t.done ? 'on' : ''}" data-act="task-toggle" data-id="${t.id}" aria-label="${t.done ? 'Reabrir' : 'Concluir'} ${esc(t.title)}">${ic('check')}</button>
+      <button type="button" class="grow" data-act="task-edit" data-id="${t.id}" style="text-align:left">
+        <span class="title">${esc(t.title)}</span>${meta ? `<span class="meta">${meta}</span>` : ''}
+      </button>
+    </div>`;
+  }
+  function txRow(x) {
+    const tags = [esc(x.cat), x.scope === 'empresa' ? `<span class="pill">${ic('briefcase')}Empresa</span>` : '', x.auto ? `<span class="pill">${ic('repeat')}Automático</span>` : ''].filter(Boolean).join(' · ');
+    return `<button type="button" class="row" data-act="tx-edit" data-id="${x.id}">
+      ${catIcon(x.cat)}
+      <span class="grow"><span class="title">${esc(x.desc)}</span><span class="meta">${tags}</span></span>
+      <span class="amount ${x.type === 'in' ? 'pos' : ''}">${x.type === 'in' ? '+' : '−'} ${money(x.amount)}</span>
+    </button>`;
+  }
+  const demoBanner = () => (S.demo ? `<div class="demo-banner"><span><strong>Dados de exemplo.</strong> Explore à vontade: nada disso é real.</span><button type="button" class="btn sm ghost" data-act="clear-demo">Começar do zero</button></div>` : '');
+
+  // ---------- Tela: Início ----------
+  function insights() {
+    const out = [];
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth();
+    const monthList = monthTx(y, m);
+    const curOut = sum(monthList.filter((t) => t.type === 'out'));
+    const prev = new Date(y, m - 1, 1);
+    const prevOut = sum(monthTx(prev.getFullYear(), prev.getMonth()).filter((t) => t.type === 'out' && parseYmd(t.date).getDate() <= now.getDate()));
+    if (curOut > 0 && prevOut > 0) {
+      const diff = (curOut - prevOut) / prevOut;
+      if (Math.abs(diff) >= 0.05) out.push({ icon: diff > 0 ? 'up' : 'down', tone: diff > 0 ? 'out' : 'in', html: `Você gastou <b>${Math.round(Math.abs(diff) * 100)}% ${diff > 0 ? 'a mais' : 'a menos'}</b> que no mesmo período de ${monthName(prev.getFullYear(), prev.getMonth())}.` });
+    }
+    const budget = Number(S.settings.budget) || 0;
+    if (budget && curOut) {
+      const left = budget - curOut;
+      const daysLeft = daysInMonth(y, m) - now.getDate() + 1;
+      if (left < 0) out.push({ icon: 'alert', tone: 'out', html: `Você passou <b>${money(-left)}</b> do orçamento do mês.` });
+      else if (curOut / budget >= 0.7) out.push({ icon: 'wallet', tone: 'amber', html: `Restam <b>${money(left)}</b> do orçamento para ${plural(daysLeft, 'dia', 'dias')}: cerca de ${money(left / daysLeft)} por dia.` });
+    }
+    const cats = byCat(monthList);
+    if (cats.length && curOut) out.push({ icon: catMeta(cats[0][0]).icon, tone: 'info', html: `<b>${esc(cats[0][0])}</b> é sua maior despesa do mês: ${money(cats[0][1])} (${Math.round((cats[0][1] / curOut) * 100)}% do total).` });
+    const soon = S.subs.map((s) => ({ s, d: daysUntil(s.day) })).filter((x) => x.d <= 5).sort((a, b) => a.d - b.d)[0];
+    if (soon) out.push({ icon: 'repeat', tone: 'amber', html: `<b>${esc(soon.s.name)}</b> ${soon.d === 0 ? 'cobra hoje' : `cobra em ${plural(soon.d, 'dia', 'dias')}`} (${money(soon.s.amount)}).` });
+    const overdue = S.tasks.filter((t) => !t.done && t.due && t.due < today()).length;
+    if (overdue) out.push({ icon: 'alert', tone: 'out', html: `Você tem <b>${plural(overdue, 'tarefa atrasada', 'tarefas atrasadas')}</b>.` });
+    const top = S.habits.map((h) => ({ h, s: streak(h) })).sort((a, b) => b.s - a.s)[0];
+    if (top && top.s >= 3) out.push({ icon: 'flame', tone: 'amber', html: `<b>${esc(top.h.name)}</b>: ${top.s} dias seguidos${top.s >= bestStreak(top.h) ? ', seu recorde' : ''}. Continue assim!` });
+    return out.slice(0, 4);
+  }
+
+  function viewHome() {
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth();
+    const t = totals(monthTx(y, m));
+    const budget = Number(S.settings.budget) || 0;
+    const pct = budget ? t.out / budget : 0;
+
+    const hero = `<section class="card hero span-2">
+      <div class="hero-top"><span class="eyebrow">Saldo de ${monthName(y, m)}</span><button type="button" class="chip-btn" data-go="finance">Ver detalhes ${ic('right', 'sm')}</button></div>
+      <div class="big">${money(t.bal)}</div>
+      <div class="hero-split">
+        <div><span class="lbl">${ic('in', 'sm')}Entradas</span><b>${money(t.inc)}</b></div>
+        <div><span class="lbl">${ic('out', 'sm')}Saídas</span><b>${money(t.out)}</b></div>
+      </div>
+      ${budget ? `<div><div class="budget-line"><span>Orçamento do mês</span><span class="num">${Math.round(pct * 100)}% de ${money(budget)}</span></div><div class="bar ${pct >= 1 ? 'over' : pct >= 0.8 ? 'warn' : ''}"><i style="width:${Math.min(100, pct * 100).toFixed(1)}%"></i></div></div>`
+        : `<button type="button" class="link" data-act="budget">${ic('plus', 'sm')}Definir orçamento do mês</button>`}
+    </section>`;
+
+    const ask = `<button type="button" class="ask-bar span-2" data-go="chat"><svg class="mark" aria-hidden="true"><use href="#i-zeny"/></svg><span>Conte ao Zeny: "gastei 30 no almoço"</span>${ic('mic')}</button>`;
+
+    const due = S.tasks.filter((x) => !x.done && x.due && x.due <= today()).sort(sortTasks);
+    const upcoming = S.tasks.filter((x) => !x.done && (!x.due || x.due > today())).sort(sortTasks).slice(0, Math.max(0, 4 - due.length));
+    const tasksCard = `<section class="card">
+      <header class="card-head"><h2>Para hoje</h2><button type="button" class="link" data-go="tasks">Todas ${ic('right', 'sm')}</button></header>
+      ${due.length || upcoming.length ? `<div class="rows">${due.map(taskRow).join('')}${upcoming.length ? `<div class="group-label">Próximas</div>${upcoming.map(taskRow).join('')}` : ''}</div>`
+        : emptyState('tasks', 'Nada pendente', 'Diga ao Zeny: "me lembra de pagar o boleto sexta".', `<button type="button" class="btn sm ghost" data-act="new-task">${ic('plus', 'sm')}Nova tarefa</button>`)}
+    </section>`;
+
+    const doneToday = S.habits.filter((h) => h.days[today()]).length;
+    const habitsCard = `<section class="card">
+      <header class="card-head"><div><h2>Hábitos de hoje</h2><span class="sub">${S.habits.length ? (doneToday === S.habits.length ? 'Tudo feito hoje!' : `Faltam ${S.habits.length - doneToday}`) : 'Crie o primeiro'}</span></div>${S.habits.length ? ring(doneToday, S.habits.length) : ''}</header>
+      ${S.habits.length ? `<div class="habit-chips">${S.habits.map((h) => `<button type="button" class="habit-chip ${h.days[today()] ? 'on' : ''}" data-act="habit-today" data-id="${h.id}" aria-pressed="${!!h.days[today()]}"><span class="dot">${ic('check')}</span>${esc(h.name)}</button>`).join('')}</div>`
+        : emptyState('flame', 'Nenhum hábito ainda', 'Pequenas rotinas, todo dia.', `<button type="button" class="btn sm ghost" data-act="new-habit">${ic('plus', 'sm')}Novo hábito</button>`)}
+    </section>`;
+
+    const ins = insights();
+    const insightsCard = `<section class="card">
+      <header class="card-head"><h2>Insights do Zeny</h2>${ic('sparkles')}</header>
+      ${ins.length ? `<div class="insights">${ins.map((i) => `<div class="insight"><span class="i-ic tone-${i.tone}">${ic(i.icon)}</span><span>${i.html}</span></div>`).join('')}</div>`
+        : '<p class="muted small">Os insights aparecem conforme você registra gastos, tarefas e hábitos.</p>'}
+    </section>`;
+
+    const quick = `<section class="card">
+      <header class="card-head"><h2>Atalhos</h2></header>
+      <div class="quick">
+        <button type="button" data-act="new-out"><span class="q-ic tone-out">${ic('out')}</span>Gasto</button>
+        <button type="button" data-act="new-in"><span class="q-ic tone-in">${ic('in')}</span>Entrada</button>
+        <button type="button" data-act="new-task"><span class="q-ic tone-info">${ic('tasks')}</span>Tarefa</button>
+        <button type="button" data-act="new-habit"><span class="q-ic tone-amber">${ic('flame')}</span>Hábito</button>
+        <button type="button" data-act="new-goal"><span class="q-ic tone-accent">${ic('target')}</span>Meta</button>
+        <button type="button" data-act="new-sub"><span class="q-ic tone-info">${ic('repeat')}</span>Assinatura</button>
+      </div>
+    </section>`;
+
+    const recent = [...S.tx].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+    const recentCard = `<section class="card">
+      <header class="card-head"><h2>Últimos lançamentos</h2><button type="button" class="link" data-go="finance">Ver todos ${ic('right', 'sm')}</button></header>
+      ${recent.length ? `<div class="rows">${recent.map(txRow).join('')}</div>` : emptyState('wallet', 'Sem lançamentos', 'Conte um gasto ao Zeny ou use os atalhos.')}
+    </section>`;
+
+    const goalsCard = S.goals.length ? `<section class="card">
+      <header class="card-head"><h2>Metas</h2><button type="button" class="link" data-act="new-goal">${ic('plus', 'sm')}Nova</button></header>
+      <div class="rows">${S.goals.map(goalRow).join('')}</div>
+    </section>` : '';
+
+    return `${demoBanner()}<div class="grid two">${ask}${hero}${tasksCard}${habitsCard}${insightsCard}${quick}${recentCard}${goalsCard}</div>`;
+  }
+
+  // ---------- Tela: Finanças ----------
   let viewMonth = new Date(); viewMonth.setDate(1);
   let scope = 'all';
-  function renderFinance() {
+  let txQuery = '';
+
+  function niceMax(v) {
+    if (!v || v <= 0) return 100;
+    const p = 10 ** Math.floor(Math.log10(v));
+    for (const k of [1, 2, 2.5, 5, 10]) if (k * p >= v) return k * p;
+    return 10 * p;
+  }
+  function barChart(y, m) {
+    const months = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(y, m - i, 1);
+      const tt = totals(monthTx(d.getFullYear(), d.getMonth(), scope));
+      months.push({ label: shortMonth(d), inc: tt.inc, out: tt.out, cur: i === 0 });
+    }
+    const max = niceMax(Math.max(...months.map((x) => Math.max(x.inc, x.out))));
+    const W = 340, H = 190, pl = 44, pr = 6, pt = 10, pb = 26;
+    const iw = W - pl - pr, ih = H - pt - pb, gw = iw / months.length, bw = Math.min(14, gw * 0.3);
+    let s = `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Entradas e saídas dos últimos 6 meses">`;
+    for (const f of [0, 0.5, 1]) {
+      const yy = (pt + ih - ih * f).toFixed(1);
+      s += `<line class="grid-line" x1="${pl}" x2="${W - pr}" y1="${yy}" y2="${yy}"/><text class="axis" x="${pl - 6}" y="${(Number(yy) + 3).toFixed(1)}" text-anchor="end">${compact(max * f)}</text>`;
+    }
+    months.forEach((mo, i) => {
+      const cx = pl + gw * i + gw / 2;
+      const hi = (ih * mo.inc) / max, ho = (ih * mo.out) / max;
+      if (hi > 0) s += `<rect class="b-in" x="${(cx - bw - 1.5).toFixed(1)}" y="${(pt + ih - hi).toFixed(1)}" width="${bw.toFixed(1)}" height="${hi.toFixed(1)}" rx="3"><title>Entradas: ${money(mo.inc)}</title></rect>`;
+      if (ho > 0) s += `<rect class="b-out" x="${(cx + 1.5).toFixed(1)}" y="${(pt + ih - ho).toFixed(1)}" width="${bw.toFixed(1)}" height="${ho.toFixed(1)}" rx="3"><title>Saídas: ${money(mo.out)}</title></rect>`;
+      s += `<text class="axis ${mo.cur ? 'cur' : ''}" x="${cx.toFixed(1)}" y="${H - 8}" text-anchor="middle">${esc(mo.label)}</text>`;
+    });
+    return s + '</svg>';
+  }
+  function donut(list) {
+    const cats = byCat(list);
+    const total = cats.reduce((a, [, v]) => a + v, 0);
+    if (!total) return emptyState('wallet', 'Sem gastos neste mês', 'Quando você registrar gastos, eles aparecem aqui por categoria.');
+    const top = cats.slice(0, 5);
+    const rest = cats.slice(5).reduce((a, [, v]) => a + v, 0);
+    if (rest) top.push(['Outros', rest]);
+    const r = 52, c = 2 * Math.PI * r;
+    let off = 0, segs = '';
+    for (const [name, v] of top) {
+      const len = (v / total) * c;
+      const vis = top.length > 1 ? Math.max(0.5, len - 2) : len;
+      segs += `<circle cx="70" cy="70" r="${r}" stroke="${catMeta(name).color}" stroke-dasharray="${vis.toFixed(2)} ${(c - vis).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 70 70)"><title>${esc(name)}: ${money(v)}</title></circle>`;
+      off += len;
+    }
+    return `<div class="donut-wrap">
+      <svg class="donut" viewBox="0 0 140 140" role="img" aria-label="Gastos por categoria"><circle class="track" cx="70" cy="70" r="${r}"/>${segs}<text class="d-lbl" x="70" y="64">Total</text><text class="d-val" x="70" y="82">${esc(moneyShort(total))}</text></svg>
+      <ul class="legend">${top.map(([name, v]) => `<li><i style="background:${catMeta(name).color}"></i><span class="name">${esc(name)}</span><span class="v">${money(v)}</span><span class="p">${Math.round((v / total) * 100)}%</span></li>`).join('')}</ul>
+    </div>`;
+  }
+  function goalRow(g) {
+    const p = g.target ? Math.min(100, (g.saved / g.target) * 100) : 0;
+    return `<button type="button" class="goal" data-act="goal-edit" data-id="${g.id}">
+      <span class="top"><span>${esc(g.name)}</span><span class="num">${Math.round(p)}%</span></span>
+      <span class="bar"><i style="width:${p.toFixed(1)}%"></i></span>
+      <span class="small muted num">${money(g.saved)} de ${money(g.target)}</span>
+    </button>`;
+  }
+  function subRow(s) {
+    const d = daysUntil(s.day);
+    return `<button type="button" class="row" data-act="sub-edit" data-id="${s.id}">
+      ${catIcon(s.cat || 'Assinaturas')}
+      <span class="grow"><span class="title">${esc(s.name)}</span><span class="meta">Todo dia ${s.day} · ${d === 0 ? 'cobra hoje' : `em ${plural(d, 'dia', 'dias')}`}${s.autoPost !== false && allowed('autoSubs') ? ` · <span class="pill">${ic('repeat')}Automático</span>` : ''}</span></span>
+      <span class="amount">${money(s.amount)}</span>
+    </button>`;
+  }
+  function txRowsHtml() {
     const y = viewMonth.getFullYear(), m = viewMonth.getMonth();
-    $('#monthLabel').textContent = cap(viewMonth.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }));
+    const q = norm(txQuery.trim());
+    const list = monthTx(y, m, scope).filter((x) => !q || norm(x.desc + ' ' + x.cat).includes(q)).sort((a, b) => b.date.localeCompare(a.date));
+    if (!list.length) return q ? emptyState('search', 'Nada encontrado', `Nenhum lançamento com "${esc(txQuery)}".`) : emptyState('wallet', 'Nenhum lançamento', 'Conte ao Zeny: "gastei 20 no lanche".');
+    const groups = {};
+    for (const x of list) (groups[x.date] ||= []).push(x);
+    return Object.entries(groups).map(([d, items]) => {
+      const net = totals(items).bal;
+      return `<div class="group-label"><span>${esc(dayLabel(d))}</span><span class="num ${net >= 0 ? 'pos' : ''}">${net >= 0 ? '+' : '−'} ${money(Math.abs(net))}</span></div><div class="rows">${items.map(txRow).join('')}</div>`;
+    }).join('');
+  }
+  function viewFinance() {
+    const y = viewMonth.getFullYear(), m = viewMonth.getMonth();
     const list = monthTx(y, m, scope);
     const t = totals(list);
-    $('#sumIn').textContent = money(t.inc);
-    $('#sumOut').textContent = money(t.out);
-    $('#sumBal').textContent = money(t.bal);
-    $('#sumBal').className = t.bal >= 0 ? 'pos' : 'neg';
+    const isCur = monthKey(viewMonth) === monthKey(new Date());
+    const budget = Number(S.settings.budget) || 0;
+    const pct = budget ? t.out / budget : 0;
+    const bizLocked = !allowed('business');
+    const subTotal = S.subs.reduce((a, s) => a + s.amount, 0);
 
-    const cats = byCat(list);
-    const max = cats[0]?.[1] || 1;
-    $('#catBars').innerHTML = cats.length ? cats.map(([c, v]) =>
-      `<div class="bar-row"><div class="top"><span>${esc(c)}</span><span>${money(v)}</span></div><div class="bar"><i style="width:${(v / max) * 100}%"></i></div></div>`).join('')
-      : '<div class="empty">Sem gastos neste mês.</div>';
-
-    $('#goals').innerHTML = S.goals.length ? S.goals.map((g) => {
-      const p = Math.min(100, (g.saved / g.target) * 100);
-      return `<div class="item"><div class="grow"><div class="title">🎯 ${esc(g.name)}</div><div class="sub">${money(g.saved)} de ${money(g.target)} · ${Math.round(p)}%</div><div class="bar" style="margin-top:6px"><i style="width:${p}%"></i></div></div><button class="del" data-del="goals:${g.id}">×</button></div>`;
-    }).join('') : '<div class="empty">Diga: "meta de juntar 3000 para viagem"</div>';
-
-    const subTotal = S.subs.reduce((s, x) => s + x.amount, 0);
-    $('#subs').innerHTML = S.subs.length ? S.subs.map((s) =>
-      `<div class="item"><div class="grow"><div class="title">🔁 ${esc(s.name)}</div><div class="sub">Todo dia ${s.day}</div></div><b>${money(s.amount)}</b><button class="del" data-del="subs:${s.id}">×</button></div>`).join('') +
-      `<div class="sub" style="text-align:right;color:var(--muted);font-size:13px">Total mensal: ${money(subTotal)}</div>`
-      : '<div class="empty">Diga: "assinatura Spotify 21,90 dia 5"</div>';
-
-    const sorted = [...list].sort((a, b) => b.date.localeCompare(a.date));
-    $('#txList').innerHTML = sorted.length ? sorted.map((x) =>
-      `<div class="item"><div class="grow"><div class="title">${esc(x.desc)}</div><div class="sub">${esc(x.cat)} · ${fmtDate(x.date)}${x.scope === 'empresa' ? ' · 🏢 empresa' : ''}</div></div><b class="${x.type === 'in' ? 'pos' : 'neg'}">${x.type === 'in' ? '+' : '−'}${money(x.amount)}</b><button class="del" data-del="tx:${x.id}">×</button></div>`).join('')
-      : '<div class="empty">Nenhum lançamento. Fale com o Zeny: "gastei 20 no lanche".</div>';
+    return `${demoBanner()}
+    <div class="toolbar">
+      <div class="month-nav">
+        <button type="button" class="icon-btn" data-act="month-prev" aria-label="Mês anterior">${ic('left')}</button>
+        <strong>${esc(cap(viewMonth.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })))}</strong>
+        <button type="button" class="icon-btn" data-act="month-next" aria-label="Próximo mês">${ic('right')}</button>
+      </div>
+      <div class="seg" role="group" aria-label="Conta">
+        ${[['all', 'Tudo'], ['pessoal', 'Pessoal'], ['empresa', 'Empresa']].map(([k, l]) => `<button type="button" class="${scope === k ? 'on' : ''}" data-act="scope" data-id="${k}">${l}${k === 'empresa' && bizLocked ? ' ' + ic('lock', 'sm') : ''}</button>`).join('')}
+      </div>
+    </div>
+    <div class="grid">
+      <div class="stats">
+        <div class="stat"><span class="lbl">${ic('in', 'sm')}Entradas</span><b class="pos">${money(t.inc)}</b></div>
+        <div class="stat"><span class="lbl">${ic('out', 'sm')}Saídas</span><b class="neg">${money(t.out)}</b></div>
+        <div class="stat bal"><span class="lbl">${ic('wallet', 'sm')}Saldo</span><b class="${t.bal < 0 ? 'neg' : ''}">${money(t.bal)}</b></div>
+      </div>
+      ${isCur && budget ? `<section class="card"><div class="card-head"><h2>Orçamento do mês</h2><button type="button" class="link" data-act="budget">${ic('edit', 'sm')}Alterar</button></div><div class="bar ${pct >= 1 ? 'over' : pct >= 0.8 ? 'warn' : ''}"><i style="width:${Math.min(100, pct * 100).toFixed(1)}%"></i></div><p class="small muted" style="margin-top:8px">${money(t.out)} de ${money(budget)} · ${pct >= 1 ? `passou ${money(t.out - budget)}` : `restam ${money(budget - t.out)}`}</p></section>` : ''}
+      <div class="grid two">
+        <section class="card">
+          <header class="card-head"><h2>Últimos 6 meses</h2><div class="legend-inline"><span><i style="background:var(--in)"></i>Entradas</span><span><i style="background:var(--out)"></i>Saídas</span></div></header>
+          ${barChart(y, m)}
+        </section>
+        <section class="card">
+          <header class="card-head"><h2>Gastos por categoria</h2></header>
+          ${donut(list)}
+        </section>
+        <section class="card">
+          <header class="card-head"><h2>Metas de economia</h2><button type="button" class="link" data-act="new-goal">${ic('plus', 'sm')}Nova</button></header>
+          ${S.goals.length ? `<div class="rows">${S.goals.map(goalRow).join('')}</div>` : emptyState('target', 'Nenhuma meta', 'Ex.: "meta de juntar 3000 para viagem".')}
+        </section>
+        <section class="card">
+          <header class="card-head"><div><h2>Assinaturas</h2>${S.subs.length ? `<span class="sub num">${money(subTotal)} por mês</span>` : ''}</div><button type="button" class="link" data-act="new-sub">${ic('plus', 'sm')}Nova</button></header>
+          ${S.subs.length ? `<div class="rows">${[...S.subs].sort((a, b) => daysUntil(a.day) - daysUntil(b.day)).map(subRow).join('')}</div>` : emptyState('repeat', 'Nenhuma assinatura', 'Ex.: "assinatura Spotify 21,90 dia 5".')}
+        </section>
+      </div>
+      <section class="card">
+        <header class="card-head" style="flex-wrap:wrap"><h2>Lançamentos</h2>
+          <div class="head-actions" style="flex:1;justify-content:flex-end">
+            <label class="search"><span class="sr-only">Buscar lançamentos</span>${ic('search')}<input id="txSearch" type="search" placeholder="Buscar" value="${esc(txQuery)}"></label>
+            <button type="button" class="btn sm primary" data-act="new-out">${ic('plus', 'sm')}Novo</button>
+          </div>
+        </header>
+        <div id="txRows">${txRowsHtml()}</div>
+      </section>
+    </div>`;
   }
 
-  // ---------- Hábitos ----------
-  function renderHabits() {
+  // ---------- Tela: Hábitos ----------
+  const expanded = new Set();
+  const WD = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
+  function habitCard(h) {
+    const on = !!h.days[today()];
+    const st = streak(h), best = bestStreak(h);
     const now = new Date();
-    const first = new Date(now.getFullYear(), now.getMonth(), 1);
-    const daysIn = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-    $('#habitList').innerHTML = S.habits.length ? S.habits.map((h) => {
-      let cal = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'].map((d) => `<div class="wd">${d}</div>`).join('');
-      for (let i = 0; i < first.getDay(); i++) cal += '<div class="d blank"></div>';
-      for (let d = 1; d <= daysIn; d++) {
-        const key = ymd(new Date(now.getFullYear(), now.getMonth(), d));
-        cal += `<div class="d ${h.days[key] ? 'on' : ''} ${key === today() ? 'today' : ''}" data-hday="${h.id}:${key}">${d}</div>`;
+    let week = '';
+    for (let i = 6; i >= 0; i--) {
+      const d = addDays(now, -i);
+      const k = ymd(d);
+      week += `<button type="button" class="${h.days[k] ? 'on' : ''} ${i === 0 ? 'today' : ''}" data-act="habit-day" data-id="${h.id}" data-day="${k}" aria-pressed="${!!h.days[k]}" aria-label="${esc(dayLabel(k))}">${WD[d.getDay()]}<span class="d">${d.getDate()}</span></button>`;
+    }
+    const y = now.getFullYear(), m = now.getMonth(), dim = daysInMonth(y, m);
+    const monthCount = Object.keys(h.days).filter((k) => h.days[k] && k.startsWith(monthKey(now))).length;
+    let month = '';
+    if (expanded.has(h.id)) {
+      month = '<div class="month-grid">' + WD.map((d) => `<span class="wd">${d}</span>`).join('');
+      for (let i = 0; i < new Date(y, m, 1).getDay(); i++) month += '<span class="md blank"></span>';
+      for (let d = 1; d <= dim; d++) {
+        const k = ymd(new Date(y, m, d));
+        month += `<button type="button" class="md ${h.days[k] ? 'on' : ''}" data-act="habit-day" data-id="${h.id}" data-day="${k}" ${k > today() ? 'disabled' : ''}>${d}</button>`;
       }
-      const monthCount = Object.keys(h.days).filter((k) => k.startsWith(ymd(first).slice(0, 7))).length;
-      return `<div class="habit"><div class="head"><button class="check ${h.days[today()] ? 'on' : ''}" data-htoggle="${h.id}">${h.days[today()] ? '✓' : ''}</button><div class="grow" style="flex:1"><div class="title" style="font-weight:600">${esc(h.name)}</div><div class="streak">🔥 ${streak(h)} dia(s) seguidos · ${monthCount}/${daysIn} no mês</div></div><button class="del" data-del="habits:${h.id}">×</button></div><div class="cal">${cal}</div></div>`;
-    }).join('') : '<div class="empty">Nenhum hábito ainda. Diga ao Zeny: "criar hábito beber 2L de água".</div>';
+      month += '</div>';
+    }
+    return `<section class="card habit-card">
+      <div class="habit-head">
+        <span class="h-ic ${on ? 'on' : ''}">${ic('flame')}</span>
+        <div class="grow"><div class="name">${esc(h.name)}</div><div class="streak">${st ? `<b>${plural(st, 'dia seguido', 'dias seguidos')}</b>` : 'Comece hoje'}</div></div>
+        <button type="button" class="big-check ${on ? 'on' : ''}" data-act="habit-today" data-id="${h.id}" aria-pressed="${on}">${ic('check', 'sm')}${on ? 'Feito' : 'Marcar'}</button>
+      </div>
+      <div class="week">${week}</div>
+      ${month}
+      <div class="habit-foot"><span>Recorde: ${plural(best, 'dia', 'dias')} · ${monthCount} de ${dim} em ${monthName(y, m)}</span><span class="head-actions"><button type="button" class="link" data-act="habit-edit" data-id="${h.id}">${ic('edit', 'sm')}Editar</button><button type="button" class="link" data-act="habit-month" data-id="${h.id}">${expanded.has(h.id) ? 'Ocultar mês' : 'Ver mês'}</button></span></div>
+    </section>`;
+  }
+  function viewHabits() {
+    if (!S.habits.length) {
+      return `${demoBanner()}<section class="card">${emptyState('flame', 'Crie seu primeiro hábito', 'Diga ao Zeny "criar hábito beber 2L de água" ou use o botão abaixo.', `<button type="button" class="btn primary" data-act="new-habit">${ic('plus', 'sm')}Novo hábito</button>`)}</section>`;
+    }
+    const done = S.habits.filter((h) => h.days[today()]).length;
+    const top = S.habits.map((h) => ({ h, s: streak(h) })).sort((a, b) => b.s - a.s)[0];
+    return `${demoBanner()}<div class="grid">
+      <section class="card" style="display:flex;align-items:center;gap:16px">
+        ${ring(done, S.habits.length)}
+        <div><strong style="font-size:17px">${done === S.habits.length ? 'Tudo feito hoje. Parabéns!' : `${done} de ${S.habits.length} hábitos feitos hoje`}</strong>
+        <p class="muted small">${top && top.s ? `Maior sequência atual: ${esc(top.h.name)}, ${plural(top.s, 'dia', 'dias')}.` : 'Marque o que fizer para começar suas sequências.'}</p></div>
+      </section>
+      <div class="grid two">${S.habits.map(habitCard).join('')}</div>
+    </div>`;
   }
 
-  // ---------- Tarefas ----------
+  // ---------- Tela: Tarefas ----------
   let taskFilter = 'open';
-  const PRIO_ORDER = { alta: 0, media: 1, baixa: 2 };
-  function sortTasks(a, b) {
-    return (a.due || '9999').localeCompare(b.due || '9999') || PRIO_ORDER[a.prio] - PRIO_ORDER[b.prio];
-  }
-  function renderTasks() {
-    const list = S.tasks.filter((t) => (taskFilter === 'open' ? !t.done : t.done)).sort(sortTasks);
-    $('#taskList').innerHTML = list.length ? list.map((t) => {
-      const overdue = !t.done && t.due && t.due < today();
-      return `<div class="item task ${t.done ? 'done' : ''}"><button class="box" data-ttoggle="${t.id}">${t.done ? '✓' : ''}</button><div class="grow"><div class="title">${esc(t.title)}</div><div class="sub ${overdue ? 'overdue' : ''}">${t.due ? (overdue ? 'Atrasada · ' : '') + fmtDate(t.due) : 'Sem prazo'}${t.time ? ' · ' + t.time : ''}</div></div><span class="prio ${t.prio}">${t.prio === 'media' ? 'média' : t.prio}</span><button class="del" data-del="tasks:${t.id}">×</button></div>`;
-    }).join('') : `<div class="empty">${taskFilter === 'open' ? 'Tudo em dia! Diga: "me lembra de pagar o boleto sexta".' : 'Nenhuma tarefa concluída ainda.'}</div>`;
+  function viewTasks() {
+    const open = S.tasks.filter((t) => !t.done).sort(sortTasks);
+    const done = S.tasks.filter((t) => t.done).sort((a, b) => (b.doneAt || '').localeCompare(a.doneAt || ''));
+    const seg = `<div class="toolbar"><div class="seg" role="group" aria-label="Filtro">
+      <button type="button" class="${taskFilter === 'open' ? 'on' : ''}" data-act="task-filter" data-id="open">Pendentes · ${open.length}</button>
+      <button type="button" class="${taskFilter === 'done' ? 'on' : ''}" data-act="task-filter" data-id="done">Concluídas · ${done.length}</button>
+    </div>${taskFilter === 'done' && done.length ? `<button type="button" class="btn sm ghost" data-act="clear-done">${ic('trash', 'sm')}Limpar concluídas</button>` : ''}</div>`;
+    let body;
+    if (taskFilter === 'done') {
+      body = done.length ? `<div class="rows">${done.map(taskRow).join('')}</div>` : emptyState('tasks', 'Nenhuma tarefa concluída', 'As tarefas que você terminar aparecem aqui.');
+    } else if (!open.length) {
+      body = emptyState('check', 'Tudo em dia!', 'Diga ao Zeny: "me lembra de pagar o boleto sexta".', `<button type="button" class="btn sm primary" data-act="new-task">${ic('plus', 'sm')}Nova tarefa</button>`);
+    } else {
+      const td = today(), tm = ymd(addDays(new Date(), 1)), wk = ymd(addDays(new Date(), 7));
+      const groups = [
+        ['Atrasadas', open.filter((t) => t.due && t.due < td), true],
+        ['Hoje', open.filter((t) => t.due === td)],
+        ['Amanhã', open.filter((t) => t.due === tm)],
+        ['Próximos 7 dias', open.filter((t) => t.due > tm && t.due <= wk)],
+        ['Mais para frente', open.filter((t) => t.due > wk)],
+        ['Sem data', open.filter((t) => !t.due)],
+      ];
+      body = groups.filter(([, l]) => l.length).map(([label, l, alert]) => `<div class="group-label ${alert ? 'alert' : ''}"><span>${label}</span><span>${l.length}</span></div><div class="rows">${l.map(taskRow).join('')}</div>`).join('');
+    }
+    return `${demoBanner()}${seg}<section class="card">${body}</section>`;
   }
 
-  function renderAll() { renderFinance(); renderHabits(); renderTasks(); }
+  // ---------- Tela: Planos ----------
+  function priceBlock(p, billing) {
+    const monthly = Number.isFinite(p.monthly) ? p.monthly : null;
+    const annual = Number.isFinite(p.annual) ? p.annual : null;
+    if (billing === 'annual') {
+      if (annual == null) return { price: '<span class="soon">Valor em breve</span>', note: 'Plano anual' };
+      const save = monthly ? Math.round((1 - annual / (monthly * 12)) * 100) : 0;
+      return {
+        price: `<span class="cur">${money(annual / 12)}</span><span class="per">/mês</span>`,
+        note: `${money(annual)} cobrado por ano${save > 0 ? ` · <strong class="pos">economize ${save}%</strong>` : ''}`,
+      };
+    }
+    if (monthly == null) return { price: '<span class="soon">Valor em breve</span>', note: 'Plano mensal' };
+    return { price: `<span class="cur">${money(monthly)}</span><span class="per">/mês</span>`, note: 'Cobrado todo mês' };
+  }
+  function maxAnnualSaving() {
+    let best = 0;
+    for (const p of PLANS) if (Number.isFinite(p.monthly) && Number.isFinite(p.annual) && p.monthly > 0) best = Math.max(best, Math.round((1 - p.annual / (p.monthly * 12)) * 100));
+    return best;
+  }
+  function usageCard() {
+    const limit = limitOf('aiMessages');
+    const used = S.usage.month === monthKey(new Date()) ? S.usage.ai : 0;
+    const p = limit ? Math.min(1, used / limit) : 0;
+    return `<section class="card" style="margin-bottom:20px">
+      <div class="card-head"><div><span class="eyebrow">Seu plano</span><h2 style="margin-top:4px">${esc(currentPlan().name)}</h2></div><span class="pill tone-accent">${ic('crown')}${ENFORCE ? 'Ativo' : 'Modo de teste'}</span></div>
+      <div class="usage">
+        <div class="top"><span>Mensagens com a IA este mês</span><span class="num">${limit == null ? `${used} · sem limite` : `${used} de ${limit}`}</span></div>
+        ${limit == null ? '' : `<div class="bar ${p >= 1 ? 'over' : p >= 0.8 ? 'warn' : ''}"><i style="width:${(p * 100).toFixed(1)}%"></i></div>`}
+        ${ENFORCE ? '' : '<p class="small muted">Os limites ainda não estão sendo aplicados. Tudo está liberado enquanto as assinaturas não abrem.</p>'}
+      </div>
+    </section>`;
+  }
+  function viewPlans() {
+    const billing = S.settings.billing === 'monthly' ? 'monthly' : 'annual';
+    const saving = maxAnnualSaving();
+    const trial = Number(PLAN_CFG.trialDays) || 0;
+    const cards = PLANS.map((p) => {
+      const { price, note } = priceBlock(p, billing);
+      const isCurrent = p.id === currentPlan().id && ENFORCE;
+      const link = p.checkout && p.checkout[billing];
+      const cta = isCurrent
+        ? `<div class="current">${ic('check', 'sm')}Seu plano atual</div>`
+        : link
+          ? `<a class="btn ${p.highlight ? 'primary' : 'ghost'} block" href="${esc(link)}" target="_blank" rel="noopener">${trial ? `Testar ${trial} dias grátis` : `Assinar ${esc(p.name)}`}</a>`
+          : `<button type="button" class="btn ${p.highlight ? 'primary' : 'ghost'} block" data-act="plan-choose" data-id="${esc(p.id)}">${trial ? `Testar ${trial} dias grátis` : `Quero o ${esc(p.name)}`}</button>`;
+      return `<article class="plan ${p.highlight ? 'highlight' : ''}">
+        ${p.badge ? `<span class="badge">${esc(p.badge)}</span>` : ''}
+        <div><h3>${esc(p.name)}</h3><p class="tagline">${esc(p.tagline || '')}</p></div>
+        <div><div class="price">${price}</div><p class="price-note">${note}</p></div>
+        <ul>${(p.features || []).map((f) => `<li>${ic('check')}<span>${esc(f)}</span></li>`).join('')}</ul>
+        ${cta}
+      </article>`;
+    }).join('');
+    const faq = [
+      ['Qual a diferença entre o mensal e o anual?', 'No mensal você paga todo mês. No anual você paga uma vez por ano, e o valor por mês fica menor.'],
+      ['O que conta como mensagem com a IA?', 'Cada mensagem que o Zeny responde usando a inteligência artificial. Comandos simples, como "gastei 30 no almoço", também funcionam no modo local.'],
+      ['Onde ficam meus dados?', 'No seu aparelho. Só as mensagens e um resumo dos seus números são enviados à IA para ela conseguir responder.'],
+    ];
+    return `${usageCard()}
+      <div class="billing">
+        <div class="seg" role="group" aria-label="Forma de cobrança">
+          <button type="button" class="${billing === 'monthly' ? 'on' : ''}" data-act="plan-billing" data-id="monthly">Mensal</button>
+          <button type="button" class="${billing === 'annual' ? 'on' : ''}" data-act="plan-billing" data-id="annual">Anual</button>
+        </div>
+        <span class="save-tag">${saving > 0 ? `Economize até ${saving}% no anual` : 'Anual sai mais em conta'}</span>
+      </div>
+      <div class="plans">${cards}</div>
+      <section class="card" style="margin-top:20px">
+        <header class="card-head"><h2>Perguntas frequentes</h2></header>
+        <div class="rows">${faq.map(([q, a]) => `<details class="row" style="display:block"><summary class="title" style="cursor:pointer;white-space:normal">${q}</summary><p class="muted small" style="margin-top:6px">${a}</p></details>`).join('')}</div>
+        ${CFG.supportEmail ? `<p class="small muted" style="margin-top:12px">Dúvidas? Escreva para <strong>${esc(CFG.supportEmail)}</strong></p>` : ''}
+      </section>`;
+  }
 
-  // ---------- Modal genérico ----------
-  function openForm(title, fields, okLabel = 'Salvar', intro = '') {
+  // ---------- Tela: Ajustes ----------
+  function viewSettings() {
+    const mode = aiMode();
+    const th = S.settings.theme;
+    const limitedExport = !allowed('export');
+    return `<div class="settings">
+      <section class="card">
+        <header class="card-head"><h2>Perfil</h2></header>
+        <div class="set-row"><div class="grow"><div class="title">Seu nome</div><div class="desc">Como o Zeny te chama nas mensagens.</div></div><input type="text" id="setName" data-set="userName" value="${esc(S.settings.userName)}" placeholder="Seu nome" maxlength="40"></div>
+        <div class="set-row"><div class="grow"><div class="title">Plano</div><div class="desc">${esc(currentPlan().name)}${ENFORCE ? '' : ' · modo de teste'}</div></div><button type="button" class="btn sm ghost" data-go="plans">${ic('crown', 'sm')}Ver planos</button></div>
+      </section>
+      <section class="card">
+        <header class="card-head"><h2>Aparência</h2></header>
+        <div class="set-row"><div class="grow"><div class="title">Tema</div><div class="desc">Sistema segue a configuração do seu aparelho.</div></div>
+          <div class="seg" role="group" aria-label="Tema">${[['system', 'Sistema'], ['light', 'Claro'], ['dark', 'Escuro']].map(([k, l]) => `<button type="button" class="${th === k ? 'on' : ''}" data-act="theme" data-id="${k}">${l}</button>`).join('')}</div></div>
+      </section>
+      <section class="card">
+        <header class="card-head"><h2>Finanças</h2></header>
+        <div class="set-row"><div class="grow"><div class="title">Orçamento mensal</div><div class="desc">Limite de gastos do mês. O Zeny avisa quando estiver perto.</div></div><input type="number" id="setBudget" data-set="budget" inputmode="decimal" min="0" step="50" value="${Number(S.settings.budget) || ''}" placeholder="R$ 0,00"></div>
+      </section>
+      <section class="card">
+        <header class="card-head"><h2>Assistente</h2></header>
+        <div class="ai-status ${mode !== 'local' ? 'on' : ''}"><span class="dot"></span><div><div class="title">${AI_LABEL[mode]}</div><div class="desc small muted">${mode === 'claude' ? 'Respostas pelo Claude, usando a sua conta do claude.ai.' : mode === 'server' ? 'Respostas pelo servidor do Zeny.' : 'Entende comandos comuns em português, direto no aparelho.'}</div></div></div>
+        <div class="set-row"><div class="grow"><div class="title">Responder em voz alta</div><div class="desc">O Zeny lê as respostas.</div></div><button type="button" class="switch ${S.settings.speak ? 'on' : ''}" data-act="speak" role="switch" aria-checked="${!!S.settings.speak}" aria-label="Responder em voz alta"></button></div>
+        <div class="set-row"><div class="grow"><div class="title">Servidor da IA</div><div class="desc">Opcional. Endereço do servidor que guarda a chave da API.</div></div><input type="url" id="setServer" data-set="serverUrl" value="${esc(S.settings.serverUrl || CFG.serverUrl || '')}" placeholder="https://…workers.dev"></div>
+      </section>
+      <section class="card">
+        <header class="card-head"><h2>Dados</h2></header>
+        <p class="small muted" style="margin-bottom:6px">Tudo fica salvo só neste aparelho.</p>
+        <div class="set-row"><div class="grow"><div class="title">Exportar backup</div><div class="desc">${limitedExport ? `Disponível no plano ${esc(planWith('export')?.name || 'superior')}.` : 'Baixa um arquivo com todos os seus dados.'}</div></div><button type="button" class="btn sm ghost" data-act="export">${ic(limitedExport ? 'lock' : 'download', 'sm')}Exportar</button></div>
+        <div class="set-row"><div class="grow"><div class="title">Importar backup</div><div class="desc">Substitui os dados atuais pelos do arquivo.</div></div><button type="button" class="btn sm ghost" data-act="import">${ic('upload', 'sm')}Importar</button></div>
+        ${S.demo ? `<div class="set-row"><div class="grow"><div class="title">Dados de exemplo</div><div class="desc">Remove o exemplo e começa do zero.</div></div><button type="button" class="btn sm ghost" data-act="clear-demo">Limpar exemplo</button></div>` : ''}
+        <div class="set-row"><div class="grow"><div class="title">Apagar tudo</div><div class="desc">Remove lançamentos, hábitos, tarefas e a conversa.</div></div><button type="button" class="btn sm danger" data-act="erase">${ic('trash', 'sm')}Apagar</button></div>
+      </section>
+      <p class="small muted" style="text-align:center">Zeny ${VERSION}${CFG.supportEmail ? ` · ${esc(CFG.supportEmail)}` : ''}</p>
+    </div>`;
+  }
+
+  // ---------- Renderização ----------
+  function headFor(view) {
+    const mobileBtns = `<button type="button" class="icon-btn only-mobile" data-go="plans" aria-label="Planos">${ic('crown')}</button><button type="button" class="icon-btn only-mobile" data-go="settings" aria-label="Ajustes">${ic('settings')}</button>`;
+    const name = S.settings.userName;
+    const open = S.tasks.filter((t) => !t.done).length;
+    const doneH = S.habits.filter((h) => h.days[today()]).length;
+    switch (view) {
+      case 'home': return { t: `${greeting()}${name ? ', ' + esc(name) : ''}`, s: esc(cap(longDate(new Date()))), a: mobileBtns };
+      case 'finance': return { t: 'Finanças', s: 'Seu dinheiro, mês a mês', a: `<button type="button" class="btn primary sm" data-act="new-out">${ic('plus', 'sm')}<span class="hide-xs">Lançamento</span></button>${mobileBtns}` };
+      case 'habits': return { t: 'Hábitos', s: S.habits.length ? `${doneH} de ${S.habits.length} feitos hoje` : 'Construa sua rotina, um dia de cada vez', a: `<button type="button" class="btn primary sm" data-act="new-habit">${ic('plus', 'sm')}<span class="hide-xs">Hábito</span></button>${mobileBtns}` };
+      case 'tasks': return { t: 'Tarefas', s: open ? plural(open, 'tarefa pendente', 'tarefas pendentes') : 'Nada pendente', a: `<button type="button" class="btn primary sm" data-act="new-task">${ic('plus', 'sm')}<span class="hide-xs">Tarefa</span></button>${mobileBtns}` };
+      case 'plans': return { t: 'Planos', s: 'Escolha como o Zeny vai te acompanhar', a: `<button type="button" class="icon-btn only-mobile" data-go="home" aria-label="Voltar">${ic('left')}</button>` };
+      case 'settings': return { t: 'Ajustes', s: 'Perfil, aparência, assistente e dados', a: `<button type="button" class="icon-btn only-mobile" data-go="home" aria-label="Voltar">${ic('left')}</button>` };
+    }
+    return { t: 'Zeny', s: '', a: '' };
+  }
+  const VIEW_FN = { home: viewHome, finance: viewFinance, habits: viewHabits, tasks: viewTasks, plans: viewPlans, settings: viewSettings };
+
+  function renderMain() {
+    try {
+      const h = headFor(current);
+      $('#pageHead').innerHTML = `<div><h1>${h.t}</h1><p>${h.s}</p></div><div class="head-actions">${h.a}</div>`;
+      $('#view').innerHTML = VIEW_FN[current]();
+    } catch (e) {
+      console.error(e);
+      $('#view').innerHTML = `<section class="card">${emptyState('alert', 'Algo deu errado nesta tela', 'Tente abrir outra aba. Seus dados continuam salvos.')}</section>`;
+    }
+    $$('[data-go]').forEach((b) => {
+      const on = b.dataset.go === current;
+      if (b.closest('.side-nav') || b.closest('.tabbar')) { b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); }
+    });
+  }
+  function renderSide() {
+    const p = currentPlan();
+    $('#sideFoot').innerHTML = `<div class="plan-card"><span class="eyebrow">Seu plano</span><strong>${esc(p.name)}</strong><span class="muted">${AI_LABEL[aiMode()]}</span><button type="button" class="btn sm ghost" data-go="plans">${ic('crown', 'sm')}Ver planos</button></div>`;
+  }
+  function renderAiStatus() {
+    const mode = aiMode();
+    const el = $('#chatStatus');
+    el.textContent = AI_LABEL[mode];
+    el.classList.toggle('ai', mode !== 'local');
+    const sp = $('#speakToggle');
+    sp.setAttribute('aria-pressed', String(!!S.settings.speak));
+    sp.innerHTML = ic(S.settings.speak ? 'volume' : 'mute');
+    renderSide();
+  }
+  function renderAll() {
+    renderMain();
+    renderAiStatus();
+  }
+  function applyTheme() {
+    const t = S.settings.theme;
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-zeny-theme', t);
+    else document.documentElement.removeAttribute('data-zeny-theme');
+  }
+
+  // ---------- Toast ----------
+  let toastTimer;
+  function toast(msg, action) {
+    const el = $('#toast');
+    el.innerHTML = `<span>${esc(msg)}</span>${action ? `<button type="button">${esc(action.label)}</button>` : ''}`;
+    if (action) el.querySelector('button').onclick = () => { el.classList.remove('show'); action.fn(); };
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), action ? 5500 : 3000);
+  }
+
+  // ---------- Formulários ----------
+  function fieldHtml(f) {
+    const id = `f-${f.name}`;
+    if (f.type === 'select') {
+      return `<label class="field" for="${id}">${esc(f.label)}<select id="${id}" name="${f.name}">${f.options.map(([v, l, dis]) => `<option value="${esc(v)}" ${String(v) === String(f.value) ? 'selected' : ''} ${dis ? 'disabled' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
+    }
+    if (f.type === 'checkbox') {
+      return `<label class="field-check" for="${id}"><input id="${id}" type="checkbox" name="${f.name}" ${f.value ? 'checked' : ''}> ${esc(f.label)}</label>`;
+    }
+    const attrs = ['step', 'min', 'max', 'placeholder', 'maxlength', 'inputmode'].filter((k) => f[k] != null).map((k) => `${k}="${esc(f[k])}"`).join(' ');
+    return `<label class="field" for="${id}">${esc(f.label)}<input id="${id}" name="${f.name}" type="${f.type || 'text'}" value="${esc(f.value ?? '')}" ${attrs} ${f.required ? 'required' : ''}></label>`;
+  }
+  function openForm(title, fields, opts = {}) {
     const dlg = $('#modal'), form = $('#modalForm');
-    form.innerHTML = `<h2>${esc(title)}</h2>` + (intro ? `<p class="muted">${esc(intro)}</p>` : '') + fields.map((f) => {
-      if (f.type === 'select') return `<label class="field">${esc(f.label)}<select name="${f.name}">${f.options.map(([v, l]) => `<option value="${v}" ${v === f.value ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
-      return `<label class="field">${esc(f.label)}<input name="${f.name}" type="${f.type || 'text'}" value="${esc(f.value ?? '')}" ${f.step ? `step="${f.step}"` : ''} ${f.required ? 'required' : ''}></label>`;
-    }).join('') + `<div class="actions"><button value="cancel" formnovalidate>Cancelar</button><button value="ok">${esc(okLabel)}</button></div>`;
+    let body = '';
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i];
+      if (f.half && fields[i + 1] && fields[i + 1].half) { body += `<div class="field-row">${fieldHtml(f)}${fieldHtml(fields[i + 1])}</div>`; i++; } else body += fieldHtml(f);
+    }
+    form.innerHTML = `<h2 id="modalTitle">${esc(title)}</h2>${opts.intro ? `<p class="intro">${esc(opts.intro)}</p>` : ''}${body}
+      <div class="actions">
+        ${opts.danger ? `<button type="button" class="btn danger" data-close="delete" aria-label="${esc(opts.danger)}" title="${esc(opts.danger)}">${ic('trash', 'sm')}</button>` : ''}
+        <button type="button" class="btn ghost" data-close="cancel">Cancelar</button>
+        <button type="submit" class="btn primary" value="ok">${esc(opts.ok || 'Salvar')}</button>
+      </div>`;
+    dlg.returnValue = '';
+    // Enter sempre salva: excluir e cancelar não são botões de envio.
+    $$('[data-close]', form).forEach((b) => { b.onclick = () => dlg.close(b.dataset.close); });
     dlg.showModal();
+    const first = form.querySelector('input:not([type="checkbox"]), select');
+    if (first && !opts.noFocus) setTimeout(() => first.focus(), 30);
     return new Promise((resolve) => {
       dlg.onclose = () => {
-        if (dlg.returnValue !== 'ok') return resolve(null);
-        resolve(Object.fromEntries(new FormData(form)));
+        const action = dlg.returnValue;
+        if (action !== 'ok' && action !== 'delete') return resolve(null);
+        const values = {};
+        for (const f of fields) {
+          const el = form.elements[f.name];
+          values[f.name] = f.type === 'checkbox' ? el.checked : el.value;
+        }
+        resolve({ action, values });
       };
     });
   }
+  const askConfirm = async (title, text, okLabel) => !!(await openForm(title, [], { intro: text, ok: okLabel, noFocus: true }));
 
-  // Confirmação dentro do app (o confirm() do navegador nem sempre aparece).
-  const askConfirm = async (title, text, okLabel) => (await openForm(title, [], okLabel, text)) !== null;
+  const catOptions = (type) => CAT_NAMES.filter((c) => (type === 'in' ? ['Salário', 'Vendas', 'Outras receitas', 'Outros'].includes(c) : !['Salário', 'Vendas', 'Outras receitas'].includes(c))).map((c) => [c, c]);
+  const scopeOptions = () => [['pessoal', 'Pessoal'], ['empresa', allowed('business') ? 'Empresa' : `Empresa (plano ${planWith('business')?.name || 'superior'})`, !allowed('business')]];
 
-  // ---------- Eventos ----------
-  function go(view) {
-    $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + view));
-    $$('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.go === view));
-    if (view === 'settings') loadSettingsForm();
+  async function txForm(existing, type = 'out') {
+    const x = existing || { type, amount: '', desc: '', cat: type === 'in' ? 'Outras receitas' : 'Outros', scope: 'pessoal', date: today() };
+    const r = await openForm(existing ? 'Editar lançamento' : type === 'in' ? 'Nova entrada' : 'Novo gasto', [
+      { name: 'type', label: 'Tipo', type: 'select', value: x.type, options: [['out', 'Saída'], ['in', 'Entrada']] },
+      { name: 'amount', label: 'Valor (R$)', type: 'number', step: '0.01', min: '0.01', inputmode: 'decimal', value: x.amount, required: true, half: true },
+      { name: 'date', label: 'Data', type: 'date', value: x.date, required: true, half: true },
+      { name: 'desc', label: 'Descrição', value: x.desc, required: true, maxlength: 80, placeholder: 'Ex.: Mercado' },
+      { name: 'cat', label: 'Categoria', type: 'select', value: x.cat, options: [...new Set([...catOptions(x.type), [x.cat, x.cat]].map(JSON.stringify))].map(JSON.parse) },
+      { name: 'scope', label: 'Conta', type: 'select', value: x.scope, options: scopeOptions() },
+    ], { danger: existing ? 'Excluir lançamento' : null });
+    if (!r) return;
+    if (r.action === 'delete') {
+      const { id } = commit(() => { S.tx = S.tx.filter((t) => t.id !== existing.id); });
+      undoToast('Lançamento excluído', id);
+      return;
+    }
+    const v = r.values;
+    const amount = Math.abs(Number(v.amount));
+    if (!amount || !isYmd(v.date)) { toast('Confira o valor e a data.'); return; }
+    const data = { type: v.type === 'in' ? 'in' : 'out', amount, desc: cap(v.desc.trim()) || 'Lançamento', cat: v.cat, scope: v.scope === 'empresa' && allowed('business') ? 'empresa' : 'pessoal', date: v.date };
+    const { id } = commit(() => {
+      if (existing) Object.assign(S.tx.find((t) => t.id === existing.id) || {}, data);
+      else S.tx.push({ id: uid(), auto: false, subId: null, ...data });
+    });
+    undoToast(existing ? 'Lançamento atualizado' : 'Lançamento adicionado', id);
   }
 
-  function bind() {
-    $$('[data-go]').forEach((b) => b.addEventListener('click', () => go(b.dataset.go)));
-    $('#composer').addEventListener('submit', (e) => {
-      e.preventDefault();
-      const v = $('#input').value;
-      $('#input').value = '';
-      handleUser(v);
+  async function taskForm(existing) {
+    const t = existing || { title: '', due: '', time: '', prio: 'media' };
+    const r = await openForm(existing ? 'Editar tarefa' : 'Nova tarefa', [
+      { name: 'title', label: 'Tarefa', value: t.title, required: true, maxlength: 120, placeholder: 'Ex.: Pagar a conta de luz' },
+      { name: 'due', label: 'Prazo', type: 'date', value: t.due, half: true },
+      { name: 'time', label: 'Horário', type: 'time', value: t.time, half: true },
+      { name: 'prio', label: 'Prioridade', type: 'select', value: t.prio, options: [['alta', 'Alta'], ['media', 'Média'], ['baixa', 'Baixa']] },
+    ], { danger: existing ? 'Excluir tarefa' : null });
+    if (!r) return;
+    if (r.action === 'delete') {
+      const { id } = commit(() => { S.tasks = S.tasks.filter((x) => x.id !== existing.id); });
+      undoToast('Tarefa excluída', id);
+      return;
+    }
+    const v = r.values;
+    if (!v.title.trim()) return;
+    const data = { title: cap(v.title.trim()), due: isYmd(v.due) ? v.due : '', time: v.time || '', prio: v.prio };
+    const { id } = commit(() => {
+      if (existing) Object.assign(S.tasks.find((x) => x.id === existing.id) || {}, data);
+      else S.tasks.push({ id: uid(), done: false, doneAt: null, ...data });
     });
-    $$('#suggestions button').forEach((b) => b.addEventListener('click', () => handleUser(b.textContent)));
+    undoToast(existing ? 'Tarefa atualizada' : 'Tarefa criada', id);
+  }
 
-    $('#prevMonth').onclick = () => { viewMonth.setMonth(viewMonth.getMonth() - 1); renderFinance(); };
-    $('#nextMonth').onclick = () => { viewMonth.setMonth(viewMonth.getMonth() + 1); renderFinance(); };
-    $$('#scopeSeg button').forEach((b) => b.addEventListener('click', () => {
-      scope = b.dataset.scope;
-      $$('#scopeSeg button').forEach((x) => x.classList.toggle('on', x === b));
-      renderFinance();
-    }));
-    $$('#taskSeg button').forEach((b) => b.addEventListener('click', () => {
-      taskFilter = b.dataset.f;
-      $$('#taskSeg button').forEach((x) => x.classList.toggle('on', x === b));
-      renderTasks();
-    }));
-
-    document.addEventListener('click', async (e) => {
-      const del = e.target.closest('[data-del]');
-      if (del) {
-        const [coll, id] = del.dataset.del.split(':');
-        if (!(await askConfirm('Excluir item', 'Esta ação não pode ser desfeita.', 'Excluir'))) return;
-        S[coll] = S[coll].filter((x) => x.id !== id);
-        save(); renderAll();
-        return;
-      }
-      const ht = e.target.closest('[data-htoggle]');
-      if (ht) {
-        const h = S.habits.find((x) => x.id === ht.dataset.htoggle);
-        if (h.days[today()]) delete h.days[today()]; else h.days[today()] = true;
-        save(); renderHabits();
-        return;
-      }
-      const hd = e.target.closest('[data-hday]');
-      if (hd) {
-        const [id, key] = hd.dataset.hday.split(':');
-        if (key > today()) return;
-        const h = S.habits.find((x) => x.id === id);
-        if (h.days[key]) delete h.days[key]; else h.days[key] = true;
-        save(); renderHabits();
-        return;
-      }
-      const tt = e.target.closest('[data-ttoggle]');
-      if (tt) {
-        const t = S.tasks.find((x) => x.id === tt.dataset.ttoggle);
-        t.done = !t.done; t.doneAt = t.done ? today() : null;
-        save(); renderTasks();
-      }
+  async function habitForm(existing) {
+    if (!existing && !underLimit('habits', S.habits.length)) { gate(`Seu plano permite até ${limitOf('habits')} hábitos.`); return; }
+    const r = await openForm(existing ? 'Editar hábito' : 'Novo hábito', [
+      { name: 'name', label: 'Nome do hábito', value: existing ? existing.name : '', required: true, maxlength: 60, placeholder: 'Ex.: Beber 2L de água' },
+    ], { danger: existing ? 'Excluir hábito' : null });
+    if (!r) return;
+    if (r.action === 'delete') {
+      const { id } = commit(() => { S.habits = S.habits.filter((h) => h.id !== existing.id); });
+      undoToast('Hábito excluído', id);
+      return;
+    }
+    const name = cap(r.values.name.trim());
+    if (!name) return;
+    const { id } = commit(() => {
+      if (existing) { const h = S.habits.find((x) => x.id === existing.id); if (h) h.name = name; }
+      else S.habits.push({ id: uid(), name, days: {}, created: today() });
     });
+    undoToast(existing ? 'Hábito atualizado' : 'Hábito criado', id);
+  }
 
-    $('#addTx').onclick = async () => {
-      const v = await openForm('Novo lançamento', [
-        { name: 'kind', label: 'Tipo', type: 'select', value: 'out', options: [['out', 'Saída'], ['in', 'Entrada']] },
-        { name: 'amount', label: 'Valor (R$)', type: 'number', step: '0.01', required: true },
-        { name: 'description', label: 'Descrição', required: true },
-        { name: 'category', label: 'Categoria', type: 'select', value: 'Outros', options: [...Object.keys(CATS), 'Outros', 'Outras receitas'].map((c) => [c, c]) },
-        { name: 'scope', label: 'Conta', type: 'select', value: 'pessoal', options: [['pessoal', 'Pessoal'], ['empresa', 'Empresa']] },
-        { name: 'date', label: 'Data', type: 'date', value: today() },
-      ]);
-      if (v) applyActions([{ type: 'add_transaction', ...v }]);
-    };
-    $('#addHabit').onclick = async () => {
-      const v = await openForm('Novo hábito', [{ name: 'name', label: 'Nome do hábito', required: true }]);
-      if (v) applyActions([{ type: 'add_habit', name: v.name }]);
-    };
-    $('#addTask').onclick = async () => {
-      const v = await openForm('Nova tarefa', [
-        { name: 'title', label: 'Tarefa', required: true },
-        { name: 'priority', label: 'Prioridade', type: 'select', value: 'media', options: [['alta', 'Alta'], ['media', 'Média'], ['baixa', 'Baixa']] },
-        { name: 'due', label: 'Prazo', type: 'date' },
-        { name: 'time', label: 'Horário', type: 'time' },
-      ]);
-      if (v) applyActions([{ type: 'add_task', ...v }]);
-    };
+  async function goalForm(existing) {
+    if (!existing && !underLimit('goals', S.goals.length)) { gate(`Seu plano permite até ${limitOf('goals')} meta(s).`); return; }
+    const g = existing || { name: '', target: '', saved: 0 };
+    const fields = [
+      { name: 'name', label: 'Nome da meta', value: g.name, required: true, maxlength: 60, placeholder: 'Ex.: Viagem de férias' },
+      { name: 'target', label: 'Quanto quer juntar (R$)', type: 'number', step: '0.01', min: '1', inputmode: 'decimal', value: g.target, required: true, half: true },
+      { name: 'saved', label: 'Já guardado (R$)', type: 'number', step: '0.01', min: '0', inputmode: 'decimal', value: g.saved, half: true },
+    ];
+    if (existing) fields.push({ name: 'add', label: 'Guardar agora (R$)', type: 'number', step: '0.01', inputmode: 'decimal', placeholder: 'Ex.: 200' });
+    const r = await openForm(existing ? existing.name : 'Nova meta', fields, { danger: existing ? 'Excluir meta' : null });
+    if (!r) return;
+    if (r.action === 'delete') {
+      const { id } = commit(() => { S.goals = S.goals.filter((x) => x.id !== existing.id); });
+      undoToast('Meta excluída', id);
+      return;
+    }
+    const v = r.values;
+    const target = Math.abs(Number(v.target));
+    if (!v.name.trim() || !target) { toast('Confira o nome e o valor da meta.'); return; }
+    const saved = Math.max(0, (Number(v.saved) || 0) + (Number(v.add) || 0));
+    const { id } = commit(() => {
+      const data = { name: cap(v.name.trim()), target, saved };
+      if (existing) Object.assign(S.goals.find((x) => x.id === existing.id) || {}, data);
+      else S.goals.push({ id: uid(), ...data });
+    });
+    undoToast(existing ? 'Meta atualizada' : 'Meta criada', id);
+  }
 
-    $('#saveSettings').onclick = () => {
-      S.settings.serverUrl = $('#serverUrl').value.trim();
-      S.settings.speak = $('#speak').checked;
-      S.settings.userName = $('#userName').value.trim();
-      save(); updateMode();
-      toast('Ajustes salvos');
-      go('chat');
-    };
-    $('#exportData').onclick = () => {
-      const copy = { ...S };
-      const blob = new Blob([JSON.stringify(copy, null, 2)], { type: 'application/json' });
+  async function subForm(existing) {
+    const s = existing || { name: '', amount: '', day: new Date().getDate(), cat: 'Assinaturas', scope: 'pessoal', autoPost: true };
+    const fields = [
+      { name: 'name', label: 'Nome', value: s.name, required: true, maxlength: 60, placeholder: 'Ex.: Spotify' },
+      { name: 'amount', label: 'Valor por mês (R$)', type: 'number', step: '0.01', min: '0.01', inputmode: 'decimal', value: s.amount, required: true, half: true },
+      { name: 'day', label: 'Dia da cobrança', type: 'number', min: '1', max: '31', value: s.day, required: true, half: true },
+      { name: 'cat', label: 'Categoria', type: 'select', value: s.cat, options: catOptions('out') },
+      { name: 'scope', label: 'Conta', type: 'select', value: s.scope, options: scopeOptions() },
+    ];
+    if (allowed('autoSubs')) fields.push({ name: 'autoPost', label: 'Lançar automaticamente no dia da cobrança', type: 'checkbox', value: s.autoPost !== false });
+    const r = await openForm(existing ? 'Editar assinatura' : 'Nova assinatura', fields, { danger: existing ? 'Excluir assinatura' : null });
+    if (!r) return;
+    if (r.action === 'delete') {
+      const { id } = commit(() => { S.subs = S.subs.filter((x) => x.id !== existing.id); });
+      undoToast('Assinatura excluída', id);
+      return;
+    }
+    const v = r.values;
+    const amount = Math.abs(Number(v.amount));
+    const day = Math.min(31, Math.max(1, Number(v.day) || 1));
+    if (!v.name.trim() || !amount) { toast('Confira o nome e o valor.'); return; }
+    const data = { name: cap(v.name.trim()), amount, day, cat: v.cat, scope: v.scope === 'empresa' && allowed('business') ? 'empresa' : 'pessoal', autoPost: v.autoPost !== false };
+    const { id } = commit(() => {
+      if (existing) {
+        const x = S.subs.find((q) => q.id === existing.id);
+        if (x) { if (x.day !== day) x.lastPosted = initialLastPosted(day); Object.assign(x, data); }
+      } else S.subs.push({ id: uid(), lastPosted: initialLastPosted(day), ...data });
+    });
+    undoToast(existing ? 'Assinatura atualizada' : 'Assinatura criada', id);
+  }
+
+  async function budgetForm() {
+    const r = await openForm('Orçamento do mês', [
+      { name: 'budget', label: 'Quanto você quer gastar por mês (R$)', type: 'number', step: '50', min: '0', inputmode: 'decimal', value: Number(S.settings.budget) || '', placeholder: 'Ex.: 3000' },
+    ], { intro: 'O Zeny mostra quanto falta e avisa quando os gastos chegarem perto do limite.' });
+    if (!r) return;
+    const v = Math.max(0, Number(r.values.budget) || 0);
+    const { id } = commit(() => { S.settings.budget = v; });
+    undoToast(v ? `Orçamento: ${money(v)} por mês` : 'Orçamento removido', id);
+  }
+
+  // ---------- Planos: escolha ----------
+  async function choosePlan(planId) {
+    const p = PLANS.find((x) => x.id === planId);
+    if (!p) return;
+    const intro = ENFORCE
+      ? `As assinaturas do plano ${p.name} abrem em breve.`
+      : `As assinaturas abrem em breve. Enquanto isso, você pode ativar o plano ${p.name} em modo de teste para ver como ele funciona.`;
+    const r = await openForm(`Plano ${p.name}`, [], { intro, ok: ENFORCE ? 'Entendi' : 'Ativar em teste', noFocus: true });
+    if (r && !ENFORCE) {
+      S.settings.plan = p.id;
+      save(); renderAll();
+      toast(`Plano ${p.name} ativado em modo de teste`);
+    }
+  }
+
+  // ---------- Dados ----------
+  async function exportData() {
+    if (!allowed('export')) { gate(`Exportar backup faz parte do plano ${planWith('export')?.name || 'superior'}.`); return; }
+    const copy = JSON.parse(JSON.stringify(S));
+    delete copy.settings.serverUrl;
+    const json = JSON.stringify(copy, null, 2);
+    const filename = `zeny-backup-${today()}.json`;
+    if (downloadsApi) {
+      try { await downloadsApi.save({ filename, data: json }); toast('Backup salvo'); }
+      catch (e) { if (e && e.code !== 'declined') toast('Não foi possível salvar o backup aqui.'); }
+      return;
+    }
+    try {
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `zeny-backup-${today()}.json`;
+      a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+      a.download = filename;
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(a.href);
-    };
-    $('#importData').onchange = async (e) => {
-      const f = e.target.files[0];
-      if (!f) return;
-      try {
-        const data = JSON.parse(await f.text());
-        const settings = S.settings;
-        S = Object.assign(defaults(), data);
-        S.settings = Object.assign({}, settings, data.settings, { serverUrl: settings.serverUrl });
-        save(); renderChat(); renderAll(); updateMode();
-        toast('Backup importado');
-      } catch (err) { toast('Arquivo inválido'); }
-      e.target.value = '';
-    };
-    $('#clearData').onclick = async () => {
-      if (!(await askConfirm('Apagar tudo', 'Todos os lançamentos, hábitos, tarefas e a conversa serão apagados deste aparelho.', 'Apagar tudo'))) return;
-      const settings = S.settings;
-      S = defaults(); S.settings = settings;
-      save(); renderChat(); renderAll(); welcome();
-      toast('Dados apagados');
-    };
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    } catch (e) { toast('Não foi possível salvar o backup aqui.'); }
+  }
+  async function importData(file) {
+    try {
+      const data = JSON.parse(await file.text());
+      if (!data || typeof data !== 'object' || !Array.isArray(data.tx)) throw new Error('formato');
+      if (!(await askConfirm('Importar backup', `Os dados atuais serão substituídos pelos do arquivo "${file.name}".`, 'Importar'))) return;
+      const keep = { serverUrl: S.settings.serverUrl, onboarded: true };
+      S = migrate(data);
+      Object.assign(S.settings, keep);
+      undoStack.length = 0;
+      save(); applyTheme(); renderAll(); renderChat(); renderSuggestions();
+      toast('Backup importado');
+    } catch (e) { toast('Esse arquivo não é um backup válido do Zeny.'); }
+  }
+  function resetData(keepDemo = false) {
+    const settings = { ...S.settings, budget: 0 };
+    S = defaults();
+    S.settings = Object.assign(S.settings, settings, { onboarded: true });
+    S.demo = keepDemo;
+    undoStack.length = 0;
+    save();
   }
 
-  function loadSettingsForm() {
-    $('#serverUrl').value = S.settings.serverUrl || serverUrl();
-    $('#speak').checked = S.settings.speak;
-    $('#userName').value = S.settings.userName;
-  }
-  function updateMode() {
-    const el = $('#modeLabel');
-    el.textContent = serverUrl() ? 'IA conectada' : 'Modo local';
-    el.classList.toggle('ai', !!serverUrl());
+  // ---------- Exemplo ----------
+  function seedDemo() {
+    resetData(true);
+    const now = new Date();
+    let seed = 11;
+    const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    const addTx = (ago, day, type, amount, desc, cat, sc = 'pessoal') => {
+      const dt = new Date(now.getFullYear(), now.getMonth() - ago, day);
+      if (dt > now) return;
+      S.tx.push({ id: uid(), type, amount: Math.round(amount * 100) / 100, desc, cat, scope: sc, date: ymd(dt), auto: false, subId: null });
+    };
+    for (let i = 5; i >= 0; i--) {
+      addTx(i, 5, 'in', 4200, 'Salário', 'Salário');
+      addTx(i, 12, 'in', 600 + Math.round(rnd() * 900), 'Projeto para cliente', 'Vendas', 'empresa');
+      addTx(i, 10, 'out', 1350, 'Aluguel', 'Moradia');
+      addTx(i, 15, 'out', 140 + rnd() * 60, 'Conta de luz', 'Moradia');
+      ['Mercado', 'Supermercado', 'Feira', 'Padaria'].forEach((d, k) => addTx(i, 2 + k * 7, 'out', 90 + rnd() * 160, d, 'Alimentação'));
+      addTx(i, 8, 'out', 35 + rnd() * 40, 'iFood', 'Alimentação');
+      addTx(i, 18, 'out', 60 + rnd() * 90, 'Uber', 'Transporte');
+      addTx(i, 21, 'out', 180 + rnd() * 80, 'Gasolina', 'Transporte');
+      addTx(i, 6, 'out', 99.9, 'Academia', 'Saúde');
+      if (i % 2 === 0) addTx(i, 19, 'out', 70 + rnd() * 120, 'Farmácia', 'Saúde');
+      if (i % 3 !== 1) addTx(i, 24, 'out', 90 + rnd() * 150, 'Cinema e jantar', 'Lazer');
+      if (i % 2 === 1) addTx(i, 16, 'out', 120 + rnd() * 200, 'Roupas', 'Compras');
+    }
+    const key = monthKey(now);
+    const soonDay = ((now.getDate() + 2) % 28) + 1;
+    S.subs = [
+      { id: uid(), name: 'Netflix', amount: 55.9, day: 14, cat: 'Assinaturas', scope: 'pessoal', autoPost: true, lastPosted: key },
+      { id: uid(), name: 'Spotify', amount: 21.9, day: soonDay, cat: 'Assinaturas', scope: 'pessoal', autoPost: true, lastPosted: key },
+      { id: uid(), name: 'Internet fibra', amount: 119.9, day: 20, cat: 'Moradia', scope: 'pessoal', autoPost: true, lastPosted: key },
+    ];
+    S.goals = [
+      { id: uid(), name: 'Viagem para o Nordeste', target: 6000, saved: 2350 },
+      { id: uid(), name: 'Reserva de emergência', target: 10000, saved: 4100 },
+    ];
+    const habits = [['Beber 2L de água', 0.85, 9], ['Ler 10 páginas', 0.6, 4], ['Treinar', 0.5, 0], ['Meditar 5 minutos', 0.45, 2]];
+    S.habits = habits.map(([name, p, run]) => {
+      const days = {};
+      for (let i = 45; i >= 1; i--) if (rnd() < p) days[ymd(addDays(now, -i))] = true;
+      for (let i = 1; i <= run; i++) days[ymd(addDays(now, -i))] = true;
+      if (run) delete days[ymd(addDays(now, -(run + 1)))];
+      if (name === 'Beber 2L de água') days[today()] = true;
+      return { id: uid(), name, days, created: ymd(addDays(now, -45)) };
+    });
+    const d = (n) => ymd(addDays(now, n));
+    S.tasks = [
+      { id: uid(), title: 'Pagar fatura do cartão', prio: 'alta', due: d(-1), time: '', done: false, doneAt: null },
+      { id: uid(), title: 'Ligar para o dentista', prio: 'media', due: d(0), time: '10:00', done: false, doneAt: null },
+      { id: uid(), title: 'Enviar orçamento para o cliente', prio: 'alta', due: d(0), time: '', done: false, doneAt: null },
+      { id: uid(), title: 'Comprar presente da Ana', prio: 'media', due: d(2), time: '', done: false, doneAt: null },
+      { id: uid(), title: 'Renovar a CNH', prio: 'baixa', due: '', time: '', done: false, doneAt: null },
+      { id: uid(), title: 'Revisar as contas do mês', prio: 'media', due: d(-2), time: '', done: true, doneAt: d(-1) },
+    ];
+    S.settings.budget = 3500;
+    save();
   }
 
+  // ---------- Boas-vindas e resumo do dia ----------
   function welcome() {
     if (S.chat.length) {
-      // Lembrete diário das tarefas do dia, uma vez por dia.
       const last = S.chat[S.chat.length - 1];
-      const lastDay = last.at ? ymd(new Date(last.at)) : today();
-      if (lastDay !== today()) {
+      if (ymd(new Date(last.at)) !== today()) {
         const due = S.tasks.filter((t) => !t.done && t.due && t.due <= today());
         const pending = S.habits.filter((h) => !h.days[today()]);
-        let text = `${greeting()}! `;
-        text += due.length ? `Você tem ${due.length} tarefa(s) para hoje ou atrasada(s):\n${due.map((t) => '• ' + t.title).join('\n')}` : 'Nenhuma tarefa urgente hoje.';
+        let text = `${greeting()}${S.settings.userName ? ', ' + S.settings.userName : ''}! `;
+        text += due.length ? `Você tem ${plural(due.length, 'tarefa', 'tarefas')} para hoje:\n${due.map((t) => '• ' + t.title).join('\n')}` : 'Nenhuma tarefa urgente hoje.';
         if (pending.length) text += `\n\nHábitos de hoje: ${pending.map((h) => h.name).join(', ')}.`;
-        addMsg('bot', text);
+        addMsg({ role: 'bot', text });
       }
       return;
     }
-    addMsg('bot', `Olá! Eu sou o Zeny, seu assistente pessoal. ✨\n\nFale comigo (toque no 🎤) ou escreva, e eu organizo suas finanças, hábitos e tarefas.\n\n${HELP}`);
+    const n = S.settings.userName;
+    addMsg({ role: 'bot', text: `Olá${n ? ', ' + n : ''}! Eu sou o Zeny.\nMe conte o que aconteceu e eu organizo pra você. Alguns exemplos:\n• "Gastei 38 no almoço"\n• "Recebi 1.200 de um cliente da empresa"\n• "Me lembra de ligar pro dentista amanhã às 10h"\n• "Criar hábito ler 10 páginas"\n• "Quanto gastei este mês?"` });
+  }
+
+  function showOnboarding() {
+    const ob = $('#onboard');
+    ob.hidden = false;
+    $('#onboardForm').onsubmit = (e) => {
+      e.preventDefault();
+      S.settings.userName = $('#obName').value.trim().slice(0, 40);
+      S.settings.onboarded = true;
+      save();
+      ob.hidden = true;
+      current = 'home';
+      renderAll(); welcome(); renderSuggestions();
+    };
+    $('#obDemo').onclick = () => {
+      const name = $('#obName').value.trim().slice(0, 40);
+      seedDemo();
+      if (name) S.settings.userName = name;
+      save();
+      ob.hidden = true;
+      current = 'home';
+      renderAll(); renderChat(); welcome(); renderSuggestions();
+    };
+  }
+
+  // ---------- Eventos ----------
+  const ACTIONS = {
+    'budget': () => budgetForm(),
+    'new-out': () => txForm(null, 'out'),
+    'new-in': () => txForm(null, 'in'),
+    'new-task': () => taskForm(null),
+    'new-habit': () => habitForm(null),
+    'new-goal': () => goalForm(null),
+    'new-sub': () => subForm(null),
+    'tx-edit': (id) => { const x = S.tx.find((t) => t.id === id); if (x) txForm(x); },
+    'task-edit': (id) => { const x = S.tasks.find((t) => t.id === id); if (x) taskForm(x); },
+    'habit-edit': (id) => { const x = S.habits.find((t) => t.id === id); if (x) habitForm(x); },
+    'goal-edit': (id) => { const x = S.goals.find((t) => t.id === id); if (x) goalForm(x); },
+    'sub-edit': (id) => { const x = S.subs.find((t) => t.id === id); if (x) subForm(x); },
+    'task-toggle': (id) => {
+      const t = S.tasks.find((x) => x.id === id);
+      if (!t) return;
+      const done = !t.done;
+      const { id: uidv } = commit(() => { t.done = done; t.doneAt = done ? today() : null; });
+      if (done) undoToast('Tarefa concluída', uidv);
+    },
+    'habit-today': (id) => {
+      const h = S.habits.find((x) => x.id === id);
+      if (!h) return;
+      commit(() => { if (h.days[today()]) delete h.days[today()]; else h.days[today()] = true; });
+      if (h.days[today()]) { const st = streak(h); toast(st > 1 ? `${h.name}: ${st} dias seguidos!` : `${h.name}: feito hoje!`); }
+    },
+    'habit-day': (id, el) => {
+      const h = S.habits.find((x) => x.id === id);
+      const day = el.dataset.day;
+      if (!h || !isYmd(day) || day > today()) return;
+      commit(() => { if (h.days[day]) delete h.days[day]; else h.days[day] = true; });
+    },
+    'habit-month': (id) => { if (expanded.has(id)) expanded.delete(id); else expanded.add(id); renderMain(); },
+    'month-prev': () => { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1); renderMain(); },
+    'month-next': () => { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1); renderMain(); },
+    'scope': (id) => {
+      if (id === 'empresa' && !allowed('business')) { gate(`Contas da empresa fazem parte do plano ${planWith('business')?.name || 'superior'}.`); return; }
+      scope = id; renderMain();
+    },
+    'task-filter': (id) => { taskFilter = id; renderMain(); },
+    'clear-done': async () => {
+      const { id } = commit(() => { S.tasks = S.tasks.filter((t) => !t.done); });
+      undoToast('Tarefas concluídas removidas', id);
+    },
+    'undo': (id) => undo(id),
+    'plan-billing': (id) => { S.settings.billing = id === 'monthly' ? 'monthly' : 'annual'; save(); renderMain(); },
+    'plan-choose': (id) => choosePlan(id),
+    'theme': (id) => { S.settings.theme = id; save(); applyTheme(); renderMain(); },
+    'speak': () => { S.settings.speak = !S.settings.speak; save(); renderAiStatus(); if (current === 'settings') renderMain(); toast(S.settings.speak ? 'O Zeny vai responder em voz alta' : 'Respostas em voz alta desligadas'); },
+    'export': () => exportData(),
+    'import': () => $('#importFile').click(),
+    'erase': async () => {
+      if (!(await askConfirm('Apagar tudo', 'Todos os lançamentos, hábitos, tarefas, metas e a conversa serão apagados deste aparelho. Essa ação não pode ser desfeita.', 'Apagar tudo'))) return;
+      resetData(false);
+      renderAll(); renderChat(); welcome(); renderSuggestions();
+      toast('Dados apagados');
+    },
+    'clear-demo': async () => {
+      if (!(await askConfirm('Começar do zero', 'Os dados de exemplo serão removidos. Seu nome e suas preferências continuam.', 'Limpar exemplo'))) return;
+      resetData(false);
+      renderAll(); renderChat(); welcome(); renderSuggestions();
+      toast('Pronto! Agora é com você.');
+    },
+    'suggest': (id, el) => { go('chat'); handleUser(el.textContent); },
+  };
+
+  function bind() {
+    document.addEventListener('click', (e) => {
+      const goEl = e.target.closest('[data-go]');
+      if (goEl) { e.preventDefault(); go(goEl.dataset.go); return; }
+      const a = e.target.closest('[data-act]');
+      if (!a || a.disabled) return;
+      const fn = ACTIONS[a.dataset.act];
+      if (fn) { e.preventDefault(); fn(a.dataset.id, a, e); }
+    });
+    document.addEventListener('change', (e) => {
+      const el = e.target;
+      if (el.dataset && el.dataset.set) {
+        const key = el.dataset.set;
+        if (key === 'budget') {
+          const v = Math.max(0, Number(el.value) || 0);
+          commit(() => { S.settings.budget = v; });
+        } else {
+          S.settings[key] = el.value.trim();
+          save();
+          renderAiStatus();
+          if (key === 'userName' && current === 'home') renderMain();
+        }
+        toast('Ajuste salvo');
+      }
+    });
+    document.addEventListener('input', (e) => {
+      if (e.target.id === 'txSearch') { txQuery = e.target.value; $('#txRows').innerHTML = txRowsHtml(); }
+      if (e.target.id === 'input') setComposer();
+    });
+
+    const input = $('#input');
+    $('#composer').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const v = input.value;
+      input.value = '';
+      setComposer();
+      handleUser(v);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('#composer').requestSubmit(); }
+    });
+    $('#speakToggle').addEventListener('click', () => ACTIONS.speak());
+    $('#importFile').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) importData(f); e.target.value = ''; });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && $('#shell').classList.contains('chat-open') && !$('#modal').open) go('back');
+    });
+
+    // Outra aba alterou os dados: recarrega.
+    window.addEventListener('storage', (e) => {
+      if (e.key !== STORE_KEY || !e.newValue) return;
+      try { S = migrate(JSON.parse(e.newValue)); undoStack.length = 0; applyTheme(); renderAll(); renderChat(); } catch (err) { /* ignora */ }
+    });
+    // Voltou para o app (ou virou o dia): atualiza.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      postSubscriptions();
+      renderAll();
+    });
+    window.matchMedia('(min-width: 1024px)').addEventListener?.('change', () => $('#shell').classList.remove('chat-open'));
+  }
+
+  // IA do claude.ai e salvamento de arquivos, quando a página roda como Artifact.
+  function connectClaude() {
+    const c = window.claude;
+    if (!c || typeof c.use !== 'function') return;
+    c.use('sample').then((fn) => { if (fn) { sampleFn = fn; renderAiStatus(); if (current === 'settings') renderMain(); } }).catch(() => {});
+    c.use('downloads').then((d) => { downloadsApi = d || null; }).catch(() => {});
   }
 
   // ---------- Início ----------
+  applyTheme();
   bind();
   setupVoice();
-  updateMode();
-  renderChat();
+  postSubscriptions();
   renderAll();
-  welcome();
-  if (S.chat.length > 1) $('#suggestions').style.display = 'none';
+  renderChat();
+  renderSuggestions();
+  setComposer();
+  connectClaude();
+  if (!S.settings.onboarded) showOnboarding();
+  else welcome();
 
-  if ('serviceWorker' in navigator && location.protocol !== 'file:' && !native()) {
+  if ('serviceWorker' in navigator && location.protocol === 'https:' && !native() && !window.claude) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 
-  // Exposto para testes no console.
-  window.Zeny = { localParse, parseAmount, parseDue, state: () => S };
+  // Ganchos para testes no console.
+  window.Zeny = { localParse, parseAmount, parseDue, state: () => S, seedDemo, version: VERSION };
 })();

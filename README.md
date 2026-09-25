@@ -17,11 +17,25 @@ Você fala (ou escreve) e o Zeny entende, organiza e lembra:
 | `scripts/` | Ajustes do projeto Android e configuração da URL do servidor. |
 | `.github/workflows/` | Publicação automática do site, do servidor e do app Android. |
 
+## Planos (Básico, Médio e Premium)
+
+Preços, links de pagamento e limites ficam em `web/config.js`, em `plans`:
+
+- `monthly`: preço por mês no plano mensal. `annual`: valor total cobrado no ano. Deixe `null` para mostrar "Valor em breve". A economia do anual é calculada sozinha.
+- `checkout.monthly` e `checkout.annual`: link de pagamento (Mercado Pago, Stripe, Hotmart, Kiwify...). O botão do plano abre esse link.
+- `limits`: mensagens com a IA por mês, número de hábitos e metas, contas da empresa, assinaturas automáticas e exportação. `null` = ilimitado.
+- `enforce`: com `false`, os planos aparecem mas nada é bloqueado (modo de teste). Com `true`, os limites passam a valer no app.
+- `trialDays`: dias de teste grátis mostrados nos botões. `null` = não mostrar.
+
+Hoje o plano de cada pessoa fica salvo no aparelho. Para cobrar de verdade, o pagamento precisa confirmar o plano num servidor (por exemplo, um webhook do Mercado Pago ou do Stripe chamando o `server/`), para ninguém liberar o Premium sozinho.
+
 ## Como funciona a IA
 
 ```
 App (site ou Android) ──► Servidor Zeny (Cloudflare) ──► API do Claude
                           guarda a chave em segredo
+
+App aberto no claude.ai (Artifact) ──► Claude, pela conta de quem usa
 ```
 
 O app nunca vê a chave. O servidor só aceita pedidos do site e do app Android, limita a 20 mensagens por minuto por pessoa e usa um prompt fixo do Zeny. Por isso ninguém consegue usar a sua chave para outra coisa.
