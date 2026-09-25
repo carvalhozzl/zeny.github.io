@@ -105,6 +105,7 @@
   // ---------- Estado ----------
   const defaultSettings = () => ({
     serverUrl: '', speak: false, userName: '', theme: 'system', budget: 0,
+    persona: 'padrao', voiceStyle: 'padrao', voiceURI: '',
     onboarded: false, plan: PLANS[0].id, billing: 'annual', lastView: 'home',
   });
   const defaults = () => ({ v: 2, tx: [], goals: [], wishes: [], subs: [], habits: [], tasks: [], chat: [], demo: false, usage: { month: '', ai: 0 }, settings: defaultSettings() });
@@ -753,6 +754,7 @@ Regras:
 - Para perguntas (quanto gastei, o que tenho pra fazer, quanto falta para comprar algo, dicas), responda usando os dados do contexto, sem ações.
 - Se faltar informação essencial (ex.: valor), pergunte na "reply" e não crie a ação.
 - Respostas curtas e calorosas. Use R$ no formato brasileiro. Pode usar **negrito** e listas com "• ".
+- Siga o campo "personalidade" do contexto.
 - Você só ajuda com finanças pessoais, hábitos, tarefas e organização do dia a dia.`;
 
   function aiContext() {
@@ -763,6 +765,9 @@ Regras:
       hoje: today(),
       dia_da_semana: WEEKDAYS[now.getDay()],
       nome_usuario: S.settings.userName || null,
+      personalidade: S.settings.persona === 'genio'
+        ? 'Gênio: confiante, espirituoso e rápido, com humor leve e um pouco de ironia elegante, como um inventor brilhante. Chame o usuário de "chefe" às vezes. Frases curtas e marcantes. Nunca seja grosseiro e nunca diga que é um personagem ou pessoa famosa.'
+        : 'Padrão: simpático, claro e acolhedor.',
       orcamento_mensal: Number(S.settings.budget) || null,
       mes_atual: { entradas: t.inc, saidas: t.out, saldo: t.bal, por_categoria: Object.fromEntries(byCat(list)) },
       lancamentos_recentes: S.tx.slice(-25).map(({ type, amount, desc, cat, scope, date }) => ({ tipo: type, valor: amount, desc, cat, scope, date })),
@@ -826,6 +831,42 @@ Regras:
       console.warn('IA', e);
       toast('A IA não respondeu agora. Respondi no modo local.');
     }
+  }
+
+  // ---------- Personalidade ----------
+  const QUIPS = {
+    out: ['Registrado. Todo gênio precisa de um orçamento, chefe.', 'Anotado. O dinheiro saiu, mas o controle continua aqui.', 'Feito. Gastar com estratégia também é uma arte.'],
+    in: ['Dinheiro entrando. É assim que eu gosto.', 'Excelente. O caixa agradece, chefe.', 'Registrado. Fluxo de caixa positivo é o meu tipo de notícia.'],
+    task: ['Anotado. Eu não esqueço nada, é um dos meus talentos.', 'Deixa comigo. Na hora certa, eu te lembro.', 'Agendado. Considere isso resolvido.'],
+    done: ['Missão cumprida. Próxima?', 'Concluído com estilo.'],
+    habit: ['Consistência: a melhor armadura que existe.', 'Mais um dia na sequência. Impressionante, chefe.'],
+    wish: ['Na lista. Vamos transformar esse desejo em compra.', 'Anotado. Guardando aos poucos, a gente chega lá.'],
+    save: ['Mais perto do objetivo. Gosto do plano.', 'Guardado. Paciência também é tecnologia.'],
+    hello: ['Olá, chefe. Sistemas online. O que vamos resolver hoje?', 'De volta ao trabalho, chefe? Estou pronto.'],
+  };
+  const QUIP_KIND = { add_transaction: (a) => ([a.kind, a.transaction_type, a.direction].includes('in') ? 'in' : 'out'), add_task: 'task', complete_task: 'done', add_habit: 'habit', check_habit: 'habit', add_wish: 'wish', add_to_wish: 'save', add_to_goal: 'save', add_goal: 'save', buy_wish: 'done' };
+  let quipTurn = 0;
+  function withPersona(result) {
+    if (S.settings.persona !== 'genio') return result;
+    const first = (result.actions || [])[0];
+    let kind = null;
+    if (first && QUIP_KIND[first.type]) kind = typeof QUIP_KIND[first.type] === 'function' ? QUIP_KIND[first.type](first) : QUIP_KIND[first.type];
+    else if (/^(Bom dia|Boa tarde|Boa noite)/.test(typeof result.reply === 'string' ? result.reply : '')) kind = 'hello';
+    if (!kind) return result;
+    const list = QUIPS[kind];
+    const quip = list[quipTurn++ % list.length];
+    if (kind === 'hello') return { ...result, reply: quip };
+    const base = result.reply;
+    return {
+      ...result,
+      reply: () => {
+        const r = typeof base === 'function' ? base() : base;
+        if (kind === 'out' || kind === 'in') return `${quip} ${r.replace(/^(Gasto registrado\.|Entrada registrada!)\s*/, '')}`.trim();
+        if (kind === 'task') return `${quip}${first.due ? ` Te lembro ${fmtDate(first.due)}${first.time ? ' às ' + first.time : ''}.` : ''}`;
+        if (kind === 'save') return `${quip} ${r.replace(/^Boa!\s*(Cada passo conta\.)?\s*/, '')}`.trim();
+        return quip;
+      },
+    };
   }
 
   // ---------- Chat ----------
@@ -934,7 +975,7 @@ Regras:
           gate(`Você usou as ${limitOf('aiMessages')} mensagens com a IA do plano ${currentPlan().name} este mês.`);
         }
       }
-      if (!result) result = localParse(text);
+      if (!result) result = withPersona(localParse(text));
       const wait = 420 - (Date.now() - started);
       if (wait > 0) await sleep(wait);
     } catch (e) {
@@ -1046,17 +1087,43 @@ Regras:
   const native = () => !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
   const plugin = (name) => native() && window.Capacitor.Plugins && window.Capacitor.Plugins[name];
 
-  function speak(text) {
-    if (!S.settings.speak || !text) return;
+  // Estilos: "confiante" deixa a voz mais grave e um pouco mais rápida.
+  const VOICE_STYLES = { padrao: { rate: 1, pitch: 1 }, confiante: { rate: 1.08, pitch: 0.78 }, calma: { rate: 0.9, pitch: 0.95 } };
+  const MALE_HINT = /(daniel|felipe|ricardo|antonio|antônio|fabio|fábio|thiago|humberto|donato|julio|júlio|nicolau|valerio|male|masculin)/i;
+  function ptVoices() {
+    if (!('speechSynthesis' in window)) return [];
+    return speechSynthesis.getVoices().filter((v) => /^pt/i.test(v.lang)).sort((a, b) => (b.lang === 'pt-BR') - (a.lang === 'pt-BR') || a.name.localeCompare(b.name));
+  }
+  function pickVoice() {
+    const list = ptVoices();
+    if (!list.length) return null;
+    const chosen = list.find((v) => v.voiceURI === S.settings.voiceURI);
+    if (chosen) return chosen;
+    if (S.settings.voiceStyle === 'confiante' || S.settings.persona === 'genio') {
+      const male = list.find((v) => v.lang === 'pt-BR' && MALE_HINT.test(v.name)) || list.find((v) => MALE_HINT.test(v.name));
+      if (male) return male;
+    }
+    return list.find((v) => v.lang === 'pt-BR') || list[0];
+  }
+  function speak(text, force = false) {
+    if ((!S.settings.speak && !force) || !text) return;
     const clean = text.replace(/\*\*/g, '').replace(/[•\u{1F300}-\u{1FAFF}☀-➿]/gu, '');
+    const style = VOICE_STYLES[S.settings.voiceStyle] || VOICE_STYLES.padrao;
     const tts = plugin('TextToSpeech');
-    if (tts) { tts.stop().catch(() => {}).finally(() => tts.speak({ text: clean, lang: 'pt-BR', rate: 1.0 }).catch(() => {})); return; }
-    if (!('speechSynthesis' in window)) return;
+    if (tts) { tts.stop().catch(() => {}).finally(() => tts.speak({ text: clean, lang: 'pt-BR', rate: style.rate, pitch: style.pitch }).catch(() => {})); return; }
+    if (!('speechSynthesis' in window)) { if (force) toast('Este navegador não consegue falar.'); return; }
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(clean);
     u.lang = 'pt-BR';
+    const v = pickVoice();
+    if (v) u.voice = v;
+    u.rate = style.rate;
+    u.pitch = style.pitch;
     speechSynthesis.speak(u);
   }
+  const SAMPLE = () => (S.settings.persona === 'genio'
+    ? `Olá, ${S.settings.userName || 'chefe'}. Sistemas online. Seu saldo está sob controle e eu cuido do resto.`
+    : `Olá${S.settings.userName ? ', ' + S.settings.userName : ''}! Eu sou o Zeny. Pode me contar um gasto, pedir um lembrete ou marcar um hábito.`);
 
   function setupVoice() {
     const btn = $('#micBtn');
@@ -1652,7 +1719,14 @@ Regras:
       <section class="card">
         <header class="card-head"><h2>Assistente</h2></header>
         <div class="ai-status ${mode !== 'local' ? 'on' : ''}"><span class="dot"></span><div><div class="title">${AI_LABEL[mode]}</div><div class="desc small muted">${mode === 'claude' ? 'Respostas pelo Claude, usando a sua conta do claude.ai.' : mode === 'server' ? 'Respostas pelo servidor do Zeny.' : 'Entende comandos comuns em português, direto no aparelho.'}</div></div></div>
+        <div class="set-row"><div class="grow"><div class="title">Personalidade</div><div class="desc">${S.settings.persona === 'genio' ? 'Gênio: confiante, rápido e espirituoso. Te chama de "chefe".' : 'Simpático, claro e direto.'}</div></div>
+          <div class="seg" role="group" aria-label="Personalidade">${[['padrao', 'Padrão'], ['genio', 'Gênio']].map(([k, l]) => `<button type="button" class="${(S.settings.persona || 'padrao') === k ? 'on' : ''}" data-act="persona" data-id="${k}">${l}</button>`).join('')}</div></div>
         <div class="set-row"><div class="grow"><div class="title">Responder em voz alta</div><div class="desc">O Zeny lê as respostas.</div></div><button type="button" class="switch ${S.settings.speak ? 'on' : ''}" data-act="speak" role="switch" aria-checked="${!!S.settings.speak}" aria-label="Responder em voz alta"></button></div>
+        <div class="set-row"><div class="grow"><div class="title">Estilo da voz</div><div class="desc">Confiante deixa a voz mais grave e firme.</div></div>
+          <div class="seg" role="group" aria-label="Estilo da voz">${[['padrao', 'Padrão'], ['confiante', 'Confiante'], ['calma', 'Calma']].map(([k, l]) => `<button type="button" class="${(S.settings.voiceStyle || 'padrao') === k ? 'on' : ''}" data-act="voice-style" data-id="${k}">${l}</button>`).join('')}</div></div>
+        ${ptVoices().length > 1 ? `<div class="set-row"><div class="grow"><div class="title">Voz</div><div class="desc">Vozes em português instaladas neste aparelho.</div></div>
+          <select id="setVoice" data-set="voiceURI" class="voice-select"><option value="">Automática</option>${ptVoices().map((v) => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === S.settings.voiceURI ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>` : ''}
+        <div class="set-row"><div class="grow"><div class="title">Ouvir exemplo</div><div class="desc">Teste a voz e a personalidade escolhidas.</div></div><button type="button" class="btn sm ghost" data-act="voice-test">${ic('volume', 'sm')}Ouvir</button></div>
         <div class="set-row"><div class="grow"><div class="title">Avisos de meta atingida</div><div class="desc">${notifStatus === 'granted' ? 'Você recebe uma notificação quando juntar o valor de um desejo ou meta.' : notifStatus === 'denied' ? 'Bloqueados. Libere as notificações nas configurações do navegador ou do celular.' : notifStatus === 'default' ? 'Receba uma notificação quando juntar o valor de um desejo ou meta.' : 'Aqui o aviso aparece dentro do app.'}</div></div>${notifStatus === 'granted' ? `<button type="button" class="switch ${S.settings.notify !== false ? 'on' : ''}" data-act="notif-toggle" role="switch" aria-checked="${S.settings.notify !== false}" aria-label="Avisos de meta atingida"></button>` : notifStatus === 'default' ? `<button type="button" class="btn sm ghost" data-act="notif-enable">${ic('bell', 'sm')}Ativar</button>` : ''}</div>
         <div class="set-row"><div class="grow"><div class="title">Servidor da IA</div><div class="desc">Opcional. Endereço do servidor que guarda a chave da API.</div></div><input type="url" id="setServer" data-set="serverUrl" value="${esc(S.settings.serverUrl || CFG.serverUrl || '')}" placeholder="https://…workers.dev"></div>
       </section>
@@ -2124,6 +2198,10 @@ Regras:
       return;
     }
     const n = S.settings.userName;
+    if (S.settings.persona === 'genio') {
+      addMsg({ role: 'bot', text: `Olá, chefe${n ? ' ' + n : ''}. Zeny online.\nMe conte o que aconteceu e eu organizo tudo. Alguns exemplos:\n• "Gastei 38 no almoço"\n• "Quero comprar um notebook de 4000"\n• "Me lembra de ligar pro dentista amanhã às 10h"\n• "Quanto gastei este mês?"` });
+      return;
+    }
     addMsg({ role: 'bot', text: `Olá${n ? ', ' + n : ''}! Eu sou o Zeny.\nMe conte o que aconteceu e eu organizo pra você. Alguns exemplos:\n• "Gastei 38 no almoço"\n• "Recebi 1.200 de um cliente da empresa"\n• "Me lembra de ligar pro dentista amanhã às 10h"\n• "Criar hábito ler 10 páginas"\n• "Quanto gastei este mês?"` });
   }
 
@@ -2164,6 +2242,9 @@ Regras:
     'wish-save': (id) => { const x = S.wishes.find((t) => t.id === id); if (x) depositForm(x); },
     'wish-buy': (id) => { const x = S.wishes.find((t) => t.id === id); if (x) buyForm(x); },
     'notif-enable': () => requestNotifications(),
+    'persona': (id) => { S.settings.persona = id === 'genio' ? 'genio' : 'padrao'; if (id === 'genio' && S.settings.voiceStyle === 'padrao') S.settings.voiceStyle = 'confiante'; save(); renderMain(); toast(id === 'genio' ? 'Personalidade Gênio ativada. Às ordens, chefe.' : 'Personalidade padrão ativada'); },
+    'voice-style': (id) => { S.settings.voiceStyle = VOICE_STYLES[id] ? id : 'padrao'; save(); renderMain(); speak(SAMPLE(), true); },
+    'voice-test': () => speak(SAMPLE(), true),
     'notif-toggle': () => { S.settings.notify = S.settings.notify === false; save(); renderMain(); toast(S.settings.notify ? 'Avisos ativados' : 'Avisos desligados'); },
     'tx-edit': (id) => { const x = S.tx.find((t) => t.id === id); if (x) txForm(x); },
     'task-edit': (id) => { const x = S.tasks.find((t) => t.id === id); if (x) taskForm(x); },
@@ -2242,6 +2323,7 @@ Regras:
         } else {
           S.settings[key] = el.value.trim();
           save();
+          if (key === 'voiceURI') speak(SAMPLE(), true);
           renderAiStatus();
           if (key === 'userName' && current === 'home') renderMain();
         }
@@ -2302,6 +2384,7 @@ Regras:
   renderSuggestions();
   setComposer();
   connectClaude();
+  if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => { if (current === 'settings') renderMain(); };
   refreshNotifStatus().then(() => { if (current === 'settings' || current === 'wishes') renderMain(); });
   if (!S.settings.onboarded) showOnboarding();
   else welcome();

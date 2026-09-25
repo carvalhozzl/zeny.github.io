@@ -16,6 +16,16 @@ A pessoa cadastra o que quer comprar e o preço ("quero comprar uma bicicleta de
 
 As metas de economia (reserva, viagem) também avisam quando são concluídas. A IA entende tudo isso pelas ações `add_wish`, `add_to_wish` e `buy_wish`.
 
+## Voz e personalidade
+
+Em Ajustes → Assistente:
+
+- **Personalidade Gênio**: respostas confiantes, rápidas e espirituosas, que chamam a pessoa de "chefe". Vale tanto no modo local quanto na IA.
+- **Estilo da voz**: Padrão, Confiante (mais grave e firme) ou Calma.
+- **Voz**: escolhe entre as vozes em português instaladas no aparelho. Com a personalidade Gênio, o Zeny prefere uma voz masculina.
+
+A voz usa o leitor de texto do próprio aparelho. Uma voz exclusiva, feita sob medida, exigiria um serviço pago de síntese de voz ligado ao `server/`.
+
 ## Estrutura
 
 | Pasta | O que é |

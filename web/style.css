@@ -494,6 +494,7 @@ dialog.celebrate .burst {
   height: 40px; border-radius: 11px; border: 1px solid var(--line); background: var(--surface-2); padding: 0 12px; outline: 0; min-width: 0; width: 100%; max-width: 280px;
 }
 .set-row input:focus { border-color: var(--accent); }
+.voice-select { height: 40px; border-radius: 11px; border: 1px solid var(--line); background: var(--surface-2); padding: 0 10px; max-width: 280px; width: 100%; color: var(--ink); }
 .switch { width: 46px; height: 28px; border-radius: 99px; background: var(--line-strong); position: relative; transition: background .2s; flex: none; }
 .switch::after { content: ''; position: absolute; left: 3px; top: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .2s; box-shadow: 0 1px 3px rgba(0, 0, 0, .25); }
 .switch.on { background: var(--accent); }
