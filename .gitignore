@@ -1,0 +1,7 @@
+node_modules/
+android/
+server/node_modules/
+server/.wrangler/
+*.keystore
+*.jks
+.env

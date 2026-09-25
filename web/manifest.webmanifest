@@ -1,0 +1,15 @@
+{
+  "name": "Zeny — Assistente pessoal com IA",
+  "short_name": "Zeny",
+  "description": "Fale ou escreva e o Zeny organiza suas finanças, hábitos e tarefas.",
+  "lang": "pt-BR",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F1F4F2",
+  "theme_color": "#0B7A66",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
