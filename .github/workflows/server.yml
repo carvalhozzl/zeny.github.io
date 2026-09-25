@@ -49,7 +49,12 @@ jobs:
       - name: Gravar chave da API como segredo
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: echo "$ANTHROPIC_API_KEY" | npx wrangler secret put ANTHROPIC_API_KEY
+        run: |
+          # Aceita a chave colada com espaços ou texto a mais.
+          KEY=$(printf '%s' "$ANTHROPIC_API_KEY" | grep -oE 'sk-ant-[A-Za-z0-9_-]+' | head -n1)
+          if [ -z "$KEY" ]; then echo "::error::ANTHROPIC_API_KEY não parece uma chave da Anthropic (sk-ant-...)."; exit 1; fi
+          echo "::add-mask::$KEY"
+          printf '%s' "$KEY" | npx wrangler secret put ANTHROPIC_API_KEY
       - name: Gravar chaves da Stripe como segredo
         if: ${{ env.HAS_STRIPE == 'true' }}
         env:

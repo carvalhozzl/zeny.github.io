@@ -338,8 +338,11 @@ export default {
       }),
     });
     if (!res.ok) {
-      console.error('Anthropic', res.status, await res.text());
-      return json({ error: 'IA indisponível no momento' }, 502, cors);
+      const errText = await res.text();
+      console.error('Anthropic', res.status, errText);
+      let detail = '';
+      try { const e = JSON.parse(errText).error; detail = `${e.type}: ${e.message}`; } catch (e) { detail = String(res.status); }
+      return json({ error: 'IA indisponível no momento', detail: detail.slice(0, 300) }, 502, cors);
     }
     if (quota && quota.acc) await quota.acc.incr(quota.key);
     const data = await res.json();
