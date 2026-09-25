@@ -1655,7 +1655,9 @@ Regras:
     </section>`;
   }
   function viewPlans() {
-    const billing = S.settings.billing === 'monthly' ? 'monthly' : 'annual';
+    // Sem preços anuais definidos, mostra só a cobrança mensal.
+    const hasAnnual = PLANS.some((p) => Number.isFinite(p.annual));
+    const billing = !hasAnnual || S.settings.billing === 'monthly' ? 'monthly' : 'annual';
     const saving = maxAnnualSaving();
     const trial = Number(PLAN_CFG.trialDays) || 0;
     const cards = PLANS.map((p) => {
@@ -1676,18 +1678,18 @@ Regras:
       </article>`;
     }).join('');
     const faq = [
-      ['Qual a diferença entre o mensal e o anual?', 'No mensal você paga todo mês. No anual você paga uma vez por ano, e o valor por mês fica menor.'],
+      ...(hasAnnual ? [['Qual a diferença entre o mensal e o anual?', 'No mensal você paga todo mês. No anual você paga uma vez por ano, e o valor por mês fica menor.']] : []),
       ['O que conta como mensagem com a IA?', 'Cada mensagem que o Zeny responde usando a inteligência artificial. Comandos simples, como "gastei 30 no almoço", também funcionam no modo local.'],
       ['Onde ficam meus dados?', 'No seu aparelho. Só as mensagens e um resumo dos seus números são enviados à IA para ela conseguir responder.'],
     ];
     return `${usageCard()}
-      <div class="billing">
+      ${hasAnnual ? `<div class="billing">
         <div class="seg" role="group" aria-label="Forma de cobrança">
           <button type="button" class="${billing === 'monthly' ? 'on' : ''}" data-act="plan-billing" data-id="monthly">Mensal</button>
           <button type="button" class="${billing === 'annual' ? 'on' : ''}" data-act="plan-billing" data-id="annual">Anual</button>
         </div>
         <span class="save-tag">${saving > 0 ? `Economize até ${saving}% no anual` : 'Anual sai mais em conta'}</span>
-      </div>
+      </div>` : '<div class="billing"><span class="small muted">Valores por mês, cobrados mensalmente.</span></div>'}
       <div class="plans">${cards}</div>
       <section class="card" style="margin-top:20px">
         <header class="card-head"><h2>Perguntas frequentes</h2></header>
