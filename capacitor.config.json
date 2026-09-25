@@ -7,5 +7,10 @@
   },
   "server": {
     "androidScheme": "https"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "iconColor": "#0B7A66"
+    }
   }
 }

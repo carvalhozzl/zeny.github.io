@@ -400,6 +400,28 @@ button.row:hover, .row.clickable:hover { background: var(--surface-2); border-ra
 .goal .top { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
 .goal .top span:last-child { color: var(--muted); font-weight: 600; font-size: 13px; }
 
+/* ---------- Quero comprar ---------- */
+.bar.done > i { background: var(--in); }
+.wish { display: flex; flex-direction: column; gap: 12px; }
+.wish.ready { border-color: var(--in); box-shadow: 0 0 0 3px var(--in-soft), var(--shadow); }
+.wish-head { display: flex; align-items: center; gap: 12px; }
+.wish-head .w-ic { width: 42px; height: 42px; border-radius: 13px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
+.wish.ready .w-ic { background: var(--in-soft); color: var(--in); }
+.wish-head .grow { flex: 1; min-width: 0; }
+.wish-head .name { font-weight: 650; font-size: 16px; overflow-wrap: anywhere; }
+.wish-head .pct { font: 700 20px/1 var(--f-display); color: var(--accent); }
+.wish-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.notif-line { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.notif-line .small { display: inline-flex; align-items: center; gap: 6px; }
+.goal .top .pill { font-size: 11px; }
+dialog.celebrate form { text-align: center; align-items: center; }
+dialog.celebrate .actions { width: 100%; }
+dialog.celebrate .burst {
+  width: 64px; height: 64px; border-radius: 20px; display: grid; place-items: center;
+  background: var(--in-soft); color: var(--in); animation: burst .5s ease-out;
+}
+@keyframes burst { 0% { transform: scale(.4) rotate(-12deg); opacity: 0; } 70% { transform: scale(1.12) rotate(4deg); } 100% { transform: scale(1); } }
+
 /* ---------- Hábitos ---------- */
 .habit-card { display: flex; flex-direction: column; gap: 14px; }
 .habit-head { display: flex; align-items: center; gap: 12px; }

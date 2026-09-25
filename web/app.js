@@ -20,7 +20,8 @@
   const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  // Maiúscula inicial, sem estragar nomes como "iPhone" ou "eBay".
+  const cap = (s) => (s && !/^[a-z][A-Z]/.test(s) ? s.charAt(0).toUpperCase() + s.slice(1) : s);
   const pad = (n) => String(n).padStart(2, '0');
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const sum = (list) => list.reduce((s, t) => s + t.amount, 0);
@@ -106,7 +107,7 @@
     serverUrl: '', speak: false, userName: '', theme: 'system', budget: 0,
     onboarded: false, plan: PLANS[0].id, billing: 'annual', lastView: 'home',
   });
-  const defaults = () => ({ v: 2, tx: [], goals: [], subs: [], habits: [], tasks: [], chat: [], demo: false, usage: { month: '', ai: 0 }, settings: defaultSettings() });
+  const defaults = () => ({ v: 2, tx: [], goals: [], wishes: [], subs: [], habits: [], tasks: [], chat: [], demo: false, usage: { month: '', ai: 0 }, settings: defaultSettings() });
 
   function initialLastPosted(day) {
     const now = new Date();
@@ -118,7 +119,7 @@
   function migrate(raw) {
     const d = raw && typeof raw === 'object' ? raw : {};
     const s = defaults();
-    for (const k of ['tx', 'goals', 'subs', 'habits', 'tasks', 'chat']) s[k] = Array.isArray(d[k]) ? d[k] : [];
+    for (const k of ['tx', 'goals', 'wishes', 'subs', 'habits', 'tasks', 'chat']) s[k] = Array.isArray(d[k]) ? d[k] : [];
     s.demo = !!d.demo;
     s.usage = d.usage && typeof d.usage === 'object' ? { month: String(d.usage.month || ''), ai: Number(d.usage.ai) || 0 } : s.usage;
     s.settings = Object.assign(defaultSettings(), d.settings || {});
@@ -129,7 +130,19 @@
       desc: String(t.desc || 'Lançamento'), cat: t.cat || 'Outros', scope: t.scope === 'empresa' ? 'empresa' : 'pessoal',
       date: t.date, auto: !!t.auto, subId: t.subId || null,
     }));
-    s.goals = s.goals.filter((g) => g && g.name).map((g) => ({ id: g.id || uid(), name: String(g.name), target: Number(g.target) || 0, saved: Number(g.saved) || 0 }));
+    s.goals = s.goals.filter((g) => g && g.name).map((g) => {
+      const target = Number(g.target) || 0, saved = Number(g.saved) || 0;
+      return { id: g.id || uid(), name: String(g.name), target, saved, notified: g.notified ?? (target > 0 && saved >= target), reachedAt: g.reachedAt || null };
+    });
+    s.wishes = s.wishes.filter((w) => w && w.name).map((w) => {
+      const price = Math.abs(Number(w.price)) || 0, saved = Math.max(0, Number(w.saved) || 0);
+      return {
+        id: w.id || uid(), name: String(w.name), price, saved, link: /^https?:\/\//.test(w.link || '') ? w.link : '',
+        created: isYmd(w.created) ? w.created : today(), reachedAt: w.reachedAt || null,
+        notified: w.notified ?? (price > 0 && saved >= price), bought: !!w.bought, boughtAt: w.boughtAt || null, paid: Number(w.paid) || 0,
+        deposits: Array.isArray(w.deposits) ? w.deposits.filter((x) => x && isYmd(x.date) && Number.isFinite(Number(x.amount))).map((x) => ({ date: x.date, amount: Number(x.amount) })) : [],
+      };
+    });
     s.subs = s.subs.filter((x) => x && x.name).map((x) => {
       const day = Math.min(31, Math.max(1, Number(x.day) || 1));
       return {
@@ -170,23 +183,43 @@
 
   // ---------- Alterações com "desfazer" ----------
   const undoStack = [];
-  const snapshot = () => JSON.stringify({ tx: S.tx, goals: S.goals, subs: S.subs, habits: S.habits, tasks: S.tasks, budget: S.settings.budget });
+  const snapshot = () => JSON.stringify({ tx: S.tx, goals: S.goals, wishes: S.wishes, subs: S.subs, habits: S.habits, tasks: S.tasks, budget: S.settings.budget });
   function commit(fn) {
     const snap = snapshot();
     const result = fn();
+    const reached = detectReached();
     const id = uid();
     undoStack.push({ id, snap });
     if (undoStack.length > 40) undoStack.shift();
     save();
     renderAll();
+    if (reached.length) { pendingCelebrations.push(...reached); setTimeout(flushCelebrations, 450); }
     return { id, result };
+  }
+
+  // Metas de compra e de economia: marca as que acabaram de atingir o valor.
+  const pendingCelebrations = [];
+  function detectReached() {
+    const out = [];
+    for (const w of S.wishes) {
+      if (w.bought) continue;
+      if (w.price > 0 && w.saved >= w.price) {
+        if (!w.notified) { w.notified = true; w.reachedAt = today(); out.push({ kind: 'wish', id: w.id }); }
+      } else if (w.notified) { w.notified = false; w.reachedAt = null; }
+    }
+    for (const g of S.goals) {
+      if (g.target > 0 && g.saved >= g.target) {
+        if (!g.notified) { g.notified = true; g.reachedAt = today(); out.push({ kind: 'goal', id: g.id }); }
+      } else if (g.notified) { g.notified = false; g.reachedAt = null; }
+    }
+    return out;
   }
   function undo(id) {
     const top = undoStack[undoStack.length - 1];
     if (!top || (id && top.id !== id)) { toast('Só dá para desfazer a última alteração.'); return false; }
     undoStack.pop();
     const snap = JSON.parse(top.snap);
-    Object.assign(S, { tx: snap.tx, goals: snap.goals, subs: snap.subs, habits: snap.habits, tasks: snap.tasks });
+    Object.assign(S, { tx: snap.tx, goals: snap.goals, wishes: snap.wishes || [], subs: snap.subs, habits: snap.habits, tasks: snap.tasks });
     S.settings.budget = snap.budget;
     S.chat.forEach((m) => { if (m.undoId === top.id) m.undone = true; });
     save(); renderAll(); renderChat();
@@ -253,6 +286,32 @@
     return bestScore > 0 ? best : null;
   }
 
+  const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const activeWishes = () => S.wishes.filter((w) => !w.bought);
+  function findWish(name) {
+    const list = activeWishes();
+    const n = norm(name);
+    if (!n.trim()) return null;
+    return list.find((w) => n.includes(norm(w.name))) || findByName(list, name);
+  }
+  // Estimativa de quando o desejo será atingido, pelo ritmo dos últimos 90 dias.
+  function wishPace(w) {
+    const remaining = w.price - w.saved;
+    if (remaining <= 0) return '';
+    const since = ymd(addDays(new Date(), -90));
+    const recent = w.deposits.filter((d) => d.date >= since && d.amount > 0);
+    if (!recent.length) return '';
+    const first = recent.map((d) => d.date).sort()[0];
+    const days = Math.max(14, (parseYmd(today()) - parseYmd(first)) / 86400000 + 1);
+    const perDay = sum(recent) / days;
+    if (perDay <= 0) return '';
+    const need = Math.ceil(remaining / perDay);
+    if (need <= 10) return `No seu ritmo, cerca de ${plural(need, 'dia', 'dias')}`;
+    if (need <= 60) return `No seu ritmo, cerca de ${plural(Math.round(need / 7), 'semana', 'semanas')}`;
+    return `No seu ritmo, cerca de ${plural(Math.round(need / 30), 'mês', 'meses')}`;
+  }
+  let wishCreated = false;
+
   // ---------- Ações (compartilhadas entre IA, interpretador local e formulários) ----------
   function applyActions(actions) {
     const chips = [];
@@ -263,6 +322,7 @@
       }
     });
     if (gates.length) gate(gates[0]);
+    if (wishCreated) { wishCreated = false; offerNotifications(); }
     return { chips, undoId: chips.length ? id : null };
   }
 
@@ -322,7 +382,44 @@
       case 'add_to_goal': {
         const g = findByName(S.goals, a.name) || (S.goals.length === 1 ? S.goals[0] : null);
         const amount = Number(a.amount);
+        if (!g && findWish(a.name)) { applyOne({ ...a, type: 'add_to_wish' }, chips, gates); return; }
         if (g && amount) { g.saved = Math.max(0, g.saved + amount); chips.push({ icon: 'target', tone: 'accent', label: `${g.name}: ${money(g.saved)} de ${money(g.target)}` }); }
+        return;
+      }
+      case 'add_wish': {
+        const name = cap(String(a.name || '').trim().slice(0, 60));
+        const price = Math.abs(Number(a.price ?? a.target ?? a.amount));
+        if (!name || !price) return;
+        if (activeWishes().some((w) => norm(w.name) === norm(name))) return;
+        if (!underLimit('wishes', activeWishes().length)) { gates.push(`Seu plano permite até ${limitOf('wishes')} desejos de compra.`); return; }
+        const saved = Math.max(0, Math.abs(Number(a.saved)) || 0);
+        S.wishes.push({
+          id: uid(), name, price, saved, link: /^https?:\/\//.test(a.link || '') ? a.link : '', created: today(),
+          reachedAt: null, notified: false, bought: false, boughtAt: null, paid: 0, deposits: saved ? [{ date: today(), amount: saved }] : [],
+        });
+        chips.push({ icon: 'gift', tone: 'accent', label: `Quero comprar: ${name} · ${money(price)}` });
+        wishCreated = true;
+        return;
+      }
+      case 'add_to_wish': {
+        const w = (a.id && S.wishes.find((x) => x.id === a.id)) || findWish(a.name) || (activeWishes().length === 1 ? activeWishes()[0] : null);
+        const amount = Number(a.amount);
+        if (!w || !amount) return;
+        const before = w.saved;
+        w.saved = Math.max(0, w.saved + amount);
+        w.deposits.push({ date: today(), amount: w.saved - before });
+        chips.push({ icon: 'gift', tone: 'accent', label: `${w.name}: ${money(w.saved)} de ${money(w.price)}` });
+        return;
+      }
+      case 'buy_wish': {
+        const w = (a.id && S.wishes.find((x) => x.id === a.id)) || findWish(a.name);
+        if (!w || w.bought) return;
+        const paid = Math.abs(Number(a.price_paid ?? a.amount)) || w.price;
+        w.bought = true; w.boughtAt = today(); w.paid = paid;
+        if (a.register_expense !== false) {
+          S.tx.push({ id: uid(), type: 'out', amount: paid, desc: w.name, cat: 'Compras', scope: 'pessoal', date: today(), auto: false, subId: null });
+        }
+        chips.push({ icon: 'check', tone: 'in', label: `Comprado: ${w.name} · ${money(paid)}` });
         return;
       }
       case 'add_subscription': {
@@ -384,19 +481,47 @@
     const done = S.habits.filter((h) => h.days[today()]).length;
     return `Hoje você fez ${done} de ${S.habits.length}:\n` + S.habits.map((h) => `• ${h.days[today()] ? 'Feito' : 'Falta'}: ${h.name} (${plural(streak(h), 'dia seguido', 'dias seguidos')})`).join('\n');
   }
-  const HELP = 'Você pode me dizer coisas como:\n• "Gastei 35 no almoço"\n• "Recebi 1200 de um cliente da empresa"\n• "Me lembra de ligar pro dentista amanhã às 10h"\n• "Criar hábito ler 10 páginas" e depois "li 10 páginas"\n• "Meta de juntar 5000 para viagem"\n• "Assinatura Netflix 55 dia 10"\n• "Orçamento de 3000 por mês"\n• "Quanto gastei este mês?"';
+  function wishesSummary() {
+    const list = activeWishes();
+    if (!list.length) return 'Sua lista de compras está vazia. Diga, por exemplo: "quero comprar uma bicicleta de 1500".';
+    return '**Quero comprar**\n' + list.map((w) => `• ${w.name}: ${money(w.saved)} de ${money(w.price)}${w.saved >= w.price ? ' (pronto para comprar!)' : ` (faltam ${money(w.price - w.saved)})`}`).join('\n');
+  }
+  const HELP = 'Você pode me dizer coisas como:\n• "Gastei 35 no almoço"\n• "Recebi 1200 de um cliente da empresa"\n• "Me lembra de ligar pro dentista amanhã às 10h"\n• "Criar hábito ler 10 páginas" e depois "li 10 páginas"\n• "Quero comprar uma bicicleta de 1500"\n• "Meta de juntar 5000 para viagem"\n• "Assinatura Netflix 55 dia 10"\n• "Orçamento de 3000 por mês"\n• "Quanto gastei este mês?"';
 
   // ---------- Interpretador local (português) ----------
   const AMOUNT_RE = /(?:r\$\s*)?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)(\s*(?:mil|k)\b)?(\s*(?:reais|real|conto|pila))?/i;
-  function parseAmount(text) {
-    const m = text.match(AMOUNT_RE);
-    if (!m) return null;
+  function amountValue(m) {
     let s = m[1];
     if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
     else if (/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
     let v = parseFloat(s);
     if (m[2]) v *= 1000;
-    return { value: v, raw: m[0] };
+    return v;
+  }
+  function parseAmount(text) {
+    const m = text.match(AMOUNT_RE);
+    return m ? { value: amountValue(m), raw: m[0], index: m.index } : null;
+  }
+  // Preço de um produto: prefere o número depois de "de", "por", "custa"... ("iphone 15 de 5000" = 5000).
+  function priceAmount(text) {
+    const re = new RegExp(AMOUNT_RE.source, 'gi');
+    let m, best = null, last = null;
+    while ((m = re.exec(text))) {
+      const a = { value: amountValue(m), raw: m[0], index: m.index };
+      last = a;
+      if (/(custa|custando|por|de|valor|r\$|uns|umas)\s*$/.test(text.slice(Math.max(0, m.index - 14), m.index))) best = a;
+    }
+    return best || last;
+  }
+  function cleanItemName(x) {
+    let s = x.replace(/[\s,.;:!?-]+$/, '').trim();
+    s = s.replace(/^(um|uma|uns|umas|o|a|os|as|meu|minha|meus|minhas)\s+/i, '');
+    let prev;
+    do {
+      prev = s;
+      s = s.replace(/\s+(que custa|custando|custa|no valor de|por volta de|por uns|por umas|de uns|de umas|por|de|reais|real|r\$)$/i, '').replace(/[\s,.;:!?-]+$/, '').trim();
+    } while (s !== prev);
+    return cap(s);
   }
 
   const WEEKDAYS = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
@@ -477,16 +602,58 @@
       return { actions: [{ type: 'add_subscription', name: subName, amount: amt.value, day }], reply: `Assinatura registrada. Vou considerar ${money(amt.value)} todo mês.` };
     }
 
+    // Quero comprar (lista de desejos)
+    if (/\b(lista de desejos|meus desejos|o que (eu )?quero comprar|lista de compras)\b/.test(t) && !/\b(adicion|coloc|incluir|bota)/.test(t)) return { reply: wishesSummary() };
+    // "quero comprar X" é desejo; "vou comprar X" só vira desejo com preço e sem data (senão é tarefa).
+    const strongWish = /\b(quero|desejo|sonho em|planejo|to juntando pra|estou juntando para|juntar dinheiro para|juntar dinheiro pra) comprar\b/.test(t) || /\b(lista de desejos|meta de compra)\b/.test(t);
+    const weakWish = /\b(vou|pretendo) comprar\b/.test(t) && !!priceAmount(t) && !parseDue(t).due;
+    if (strongWish || weakWish) {
+      const m = t.match(/\b(?:comprar|desejos|meta de compra)[:\s]+(?:(?:na|a|minha) lista[:\s]+)?(.+)$/);
+      if (m) {
+        const segStart = t.length - m[1].length;
+        const pa = priceAmount(t);
+        let nameO = input.slice(segStart);
+        if (pa && pa.index >= segStart) { const i = pa.index - segStart; nameO = nameO.slice(0, i) + ' ' + nameO.slice(i + pa.raw.length); }
+        const itemName = cleanItemName(nameO.replace(/\s+/g, ' '));
+        if (itemName) {
+          const phrase = nameO.replace(/\s+/g, ' ').replace(/[\s,.;:!?-]+$/, '').trim();
+          if (!pa) return { reply: `Quanto custa ${phrase}? Me diga assim: "quero comprar ${phrase} de 1500".` };
+          return { actions: [{ type: 'add_wish', name: itemName, price: pa.value }], reply: `Coloquei na sua lista! Quando guardar dinheiro, me diga "guardei 200 para ${itemName}". Eu te aviso quando você atingir o valor.` };
+        }
+      }
+    }
+    if (/\b(comprei|finalmente comprei|ja comprei)\b/.test(t)) {
+      const w = activeWishes().find((x) => t.includes(norm(x.name))) ||
+        activeWishes().find((x) => norm(x.name).split(/\s+/).some((word) => word.length >= 4 && new RegExp(`\\b${escRe(word)}\\b`).test(t)));
+      if (w) {
+        const paid = amt ? amt.value : w.price;
+        return { actions: [{ type: 'buy_wish', id: w.id, name: w.name, price_paid: paid, register_expense: true }], reply: `Que conquista! Marquei ${w.name} como comprado e lancei ${money(paid)} em Compras.` };
+      }
+    }
+
     // Metas
     if (/\bmeta\b/.test(t) && amt && /\b(criar|nova|meta de|quero|juntar|guardar|economizar)\b/.test(t) && !/\b(guardei|economizei|poupei|depositei)\b/.test(t)) {
       const nm = (t.match(/\b(?:para|pra|p\/)\s+(?:o |a |uma? )?(.+)$/) || [])[1];
       const goalName = nm ? orig(nm).replace(amt.raw, '').trim() : 'Minha meta';
       return { actions: [{ type: 'add_goal', name: goalName, target: amt.value }], reply: `Meta criada! Quando guardar dinheiro, me diga: "guardei 100 para ${goalName}".` };
     }
-    if (/\b(guardei|economizei|poupei|depositei|separei)\b/.test(t) && amt) {
-      const g = S.goals.find((x) => t.includes(norm(x.name))) || findByName(S.goals, t.replace(amt.raw, '')) || (S.goals.length === 1 ? S.goals[0] : null);
+    if (/\b(guardei|economizei|poupei|depositei|separei|juntei|reservei|coloquei)\b/.test(t) && amt) {
+      const rest = t.replace(amt.raw, ' ');
+      const wExact = activeWishes().find((x) => t.includes(norm(x.name)));
+      const gExact = S.goals.find((x) => t.includes(norm(x.name)));
+      const both = [...activeWishes(), ...S.goals];
+      const w = wExact || (!gExact && findWish(rest)) || null;
+      const g = !w ? gExact || findByName(S.goals, rest) : null;
+      if (w) {
+        const falta = w.price - w.saved - amt.value;
+        return { actions: [{ type: 'add_to_wish', id: w.id, name: w.name, amount: amt.value }], reply: falta > 0 ? `Boa! Faltam ${money(falta)} para ${w.name}.` : `Boa! Guardado para ${w.name}.` };
+      }
       if (g) return { actions: [{ type: 'add_to_goal', name: g.name, amount: amt.value }], reply: 'Boa! Cada passo conta.' };
-      return { reply: 'Você ainda não tem uma meta com esse nome. Crie uma assim: "meta de juntar 2000 para reserva".' };
+      if (both.length === 1) {
+        const only = both[0];
+        return { actions: [{ type: S.wishes.includes(only) ? 'add_to_wish' : 'add_to_goal', id: only.id, name: only.name, amount: amt.value }], reply: 'Boa! Cada passo conta.' };
+      }
+      return { reply: both.length ? `Para qual meta? Me diga assim: "guardei ${amt.value} para ${both[0].name}".` : 'Você ainda não tem metas. Crie uma assim: "quero comprar uma bicicleta de 1500" ou "meta de juntar 2000 para reserva".' };
     }
 
     // Criar hábito
@@ -526,7 +693,7 @@
       const { due, time, rawParts } = parseDue(t);
       let title = input;
       let n = norm(title);
-      const prefixes = /^(me\s+lembr[ae]\s+(de\s+)?|lembr[ae]r?(-me)?\s+(de\s+|que\s+)?|lembrete[:\s]+(de\s+|para\s+)?|nova\s+tarefa[:\s]+|tarefa[:\s]+|adicionar\s+tarefa[:\s]+|preciso\s+(de\s+)?|tenho\s+que\s+|nao\s+(posso\s+)?esquecer\s+(de\s+)?|nao\s+deixar\s+de\s+)/;
+      const prefixes = /^(me\s+lembr[ae]\s+(de\s+)?|lembr[ae]r?(-me)?\s+(de\s+|que\s+)?|lembrete[:\s]+(de\s+|para\s+)?|nova\s+tarefa[:\s]+|tarefa[:\s]+|adicionar\s+tarefa[:\s]+|preciso\s+(de\s+)?|tenho\s+que\s+|(eu\s+)?vou\s+(ter\s+que\s+)?|nao\s+(posso\s+)?esquecer\s+(de\s+)?|nao\s+deixar\s+de\s+)/;
       const pm = n.match(prefixes);
       if (pm) { title = title.slice(pm[0].length); n = n.slice(pm[0].length); }
       for (const r of rawParts) {
@@ -573,11 +740,17 @@ Ações disponíveis (use quantas forem necessárias, ou nenhuma):
 - {"type":"add_to_goal","name":string,"amount":number}
 - {"type":"add_subscription","name":string,"amount":number,"day":number}
 - {"type":"set_budget","amount":number}   (orçamento de gastos do mês)
+- {"type":"add_wish","name":string,"price":number,"saved":number opcional,"link":string opcional}   (algo que a pessoa quer comprar)
+- {"type":"add_to_wish","name":string,"amount":number}   (dinheiro guardado para um desejo de compra; negativo para retirar)
+- {"type":"buy_wish","name":string,"price_paid":number opcional,"register_expense":true|false}   (a pessoa comprou um item da lista)
 
 Regras:
 - Uma mensagem pode conter várias informações (ex.: "gastei 30 no uber e 50 no mercado" = 2 transações).
 - Calcule datas relativas (amanhã, sexta, dia 15) a partir da data de hoje do contexto.
-- Para perguntas (quanto gastei, o que tenho pra fazer, dicas), responda usando os dados do contexto, sem ações.
+- "Quero comprar X de R$ Y" é um desejo de compra (add_wish). Metas sem um item específico (reserva, viagem) usam add_goal.
+- "Guardei 200 para X": use add_to_wish se X estiver em desejos_de_compra, senão add_to_goal.
+- Quando um desejo ou meta atinge o valor, o app avisa a pessoa sozinho. Você não precisa avisar.
+- Para perguntas (quanto gastei, o que tenho pra fazer, quanto falta para comprar algo, dicas), responda usando os dados do contexto, sem ações.
 - Se faltar informação essencial (ex.: valor), pergunte na "reply" e não crie a ação.
 - Respostas curtas e calorosas. Use R$ no formato brasileiro. Pode usar **negrito** e listas com "• ".
 - Você só ajuda com finanças pessoais, hábitos, tarefas e organização do dia a dia.`;
@@ -594,6 +767,7 @@ Regras:
       mes_atual: { entradas: t.inc, saidas: t.out, saldo: t.bal, por_categoria: Object.fromEntries(byCat(list)) },
       lancamentos_recentes: S.tx.slice(-25).map(({ type, amount, desc, cat, scope, date }) => ({ tipo: type, valor: amount, desc, cat, scope, date })),
       metas: S.goals.map(({ name, target, saved }) => ({ name, target, saved })),
+      desejos_de_compra: activeWishes().map(({ name, price, saved }) => ({ name, preco: price, guardado: saved, falta: Math.max(0, price - saved) })),
       assinaturas: S.subs.map(({ name, amount, day }) => ({ name, amount, day })),
       habitos: S.habits.map((h) => ({ name: h.name, feito_hoje: !!h.days[today()], sequencia: streak(h) })),
       tarefas_pendentes: S.tasks.filter((x) => !x.done).map(({ title, prio, due, time }) => ({ title, prio, due, time })),
@@ -719,10 +893,12 @@ Regras:
     const pendingHabit = S.habits.find((h) => !h.days[today()]);
     s.push(pendingHabit ? `Fiz ${pendingHabit.name.toLowerCase()}` : S.habits.length ? 'Meus hábitos' : 'Criar hábito beber água');
     s.push('Me lembra de pagar a luz sexta');
+    if (!S.wishes.length) s.push('Quero comprar uma bicicleta de 1500');
+    else if (activeWishes().length) s.push(`Guardei 100 para ${activeWishes()[0].name.toLowerCase()}`);
     if (!S.goals.length) s.push('Meta de juntar 5000 para viagem');
     if (!S.settings.budget) s.push('Orçamento de 3000 por mês');
     s.push('Recebi 2500 de salário');
-    return s.slice(0, 6);
+    return s.slice(0, 7);
   }
   function renderSuggestions() {
     $('#suggestions').innerHTML = suggestionList().map((x) => `<button type="button" data-act="suggest">${esc(x)}</button>`).join('');
@@ -783,6 +959,87 @@ Regras:
     $('#sendBtn').disabled = busy || !input.value.trim();
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+  }
+
+  // ---------- Notificações ----------
+  // Android (Capacitor): LocalNotifications. Navegador: Notification API. Sempre há o aviso dentro do app.
+  let notifStatus = 'unknown'; // granted | denied | default | unsupported
+  async function refreshNotifStatus() {
+    const ln = plugin('LocalNotifications');
+    if (ln) {
+      try { const p = await ln.checkPermissions(); notifStatus = p.display === 'granted' ? 'granted' : p.display === 'denied' ? 'denied' : 'default'; } catch (e) { notifStatus = 'unsupported'; }
+    } else if (!('Notification' in window) || window.claude) {
+      notifStatus = 'unsupported';
+    } else {
+      notifStatus = Notification.permission;
+    }
+    return notifStatus;
+  }
+  async function requestNotifications() {
+    const ln = plugin('LocalNotifications');
+    let ok = false;
+    if (ln) {
+      try { ok = (await ln.requestPermissions()).display === 'granted'; } catch (e) { ok = false; }
+    } else if ('Notification' in window && !window.claude) {
+      try { ok = Notification.permission === 'granted' || (await Notification.requestPermission()) === 'granted'; } catch (e) { ok = false; }
+    }
+    await refreshNotifStatus();
+    S.settings.notify = ok;
+    save();
+    toast(ok ? 'Avisos ativados. O Zeny te avisa quando você atingir uma meta.' : notifStatus === 'unsupported' ? 'Aqui os avisos aparecem dentro do app.' : 'Os avisos foram bloqueados. Libere nas configurações do navegador ou do celular.');
+    if (current === 'settings' || current === 'wishes') renderMain();
+    return ok;
+  }
+  function offerNotifications() {
+    if (notifStatus !== 'default' || S.settings.notifyAsked) return;
+    S.settings.notifyAsked = true;
+    save();
+    setTimeout(() => toast('Quer receber um aviso quando atingir o valor?', { label: 'Ativar avisos', fn: () => requestNotifications() }), 900);
+  }
+  async function systemNotify(title, body, tag) {
+    if (S.settings.notify === false || notifStatus !== 'granted') return false;
+    const ln = plugin('LocalNotifications');
+    try {
+      if (ln) {
+        await ln.schedule({ notifications: [{ id: Math.floor(Math.random() * 2e9), title, body, schedule: { at: new Date(Date.now() + 800) } }] });
+        return true;
+      }
+      const reg = navigator.serviceWorker && (await navigator.serviceWorker.getRegistration());
+      if (reg && reg.showNotification) await reg.showNotification(title, { body, icon: 'icon.svg', badge: 'icon.svg', tag });
+      else new Notification(title, { body, icon: 'icon.svg', tag });
+      return true;
+    } catch (e) { return false; }
+  }
+
+  let celebrating = false;
+  async function flushCelebrations() {
+    if (celebrating) return;
+    celebrating = true;
+    try {
+      while (pendingCelebrations.length) {
+        const c = pendingCelebrations.shift();
+        if (c.kind === 'wish') {
+          const w = S.wishes.find((x) => x.id === c.id);
+          if (!w || w.bought || w.saved < w.price) continue;
+          const body = `Você já juntou ${money(w.saved)} para ${w.name}. Já pode comprar!`;
+          systemNotify('Meta atingida!', body, 'wish-' + w.id);
+          addMsg({ role: 'bot', text: `**Meta atingida!** Você já juntou ${money(w.saved)} para **${w.name}**. Já pode comprar!\nQuando comprar, me diga "comprei ${w.name}".` });
+          if (!$('#modal').open) {
+            const r = await openForm('Meta atingida!', [], { intro: body, ok: 'Registrar compra', cancel: 'Depois', celebrate: true, noFocus: true });
+            if (r) await buyForm(w);
+          }
+        } else {
+          const g = S.goals.find((x) => x.id === c.id);
+          if (!g || g.saved < g.target) continue;
+          const body = `Você completou a meta ${g.name}: ${money(g.saved)} guardados.`;
+          systemNotify('Meta concluída!', body, 'goal-' + g.id);
+          addMsg({ role: 'bot', text: `**Meta concluída!** Você juntou ${money(g.saved)} para **${g.name}**. Parabéns!` });
+          toast(`Meta concluída: ${g.name}!`);
+        }
+      }
+    } finally {
+      celebrating = false;
+    }
   }
 
   // ---------- Voz ----------
@@ -859,7 +1116,7 @@ Regras:
   }
 
   // ---------- Navegação ----------
-  const VIEWS = ['home', 'finance', 'habits', 'tasks', 'plans', 'settings'];
+  const VIEWS = ['home', 'finance', 'wishes', 'habits', 'tasks', 'plans', 'settings'];
   let current = VIEWS.includes(S.settings.lastView) ? S.settings.lastView : 'home';
   const isDesktop = () => window.matchMedia('(min-width: 1024px)').matches;
 
@@ -937,6 +1194,10 @@ Regras:
     if (cats.length && curOut) out.push({ icon: catMeta(cats[0][0]).icon, tone: 'info', html: `<b>${esc(cats[0][0])}</b> é sua maior despesa do mês: ${money(cats[0][1])} (${Math.round((cats[0][1] / curOut) * 100)}% do total).` });
     const soon = S.subs.map((s) => ({ s, d: daysUntil(s.day) })).filter((x) => x.d <= 5).sort((a, b) => a.d - b.d)[0];
     if (soon) out.push({ icon: 'repeat', tone: 'amber', html: `<b>${esc(soon.s.name)}</b> ${soon.d === 0 ? 'cobra hoje' : `cobra em ${plural(soon.d, 'dia', 'dias')}`} (${money(soon.s.amount)}).` });
+    const ready = activeWishes().filter((w) => w.saved >= w.price);
+    const near = activeWishes().filter((w) => w.saved < w.price && w.saved / w.price >= 0.8).sort((a, b) => (a.price - a.saved) - (b.price - b.saved))[0];
+    if (ready.length) out.push({ icon: 'gift', tone: 'in', html: `<b>${esc(ready[0].name)}</b> está pronto para comprar: você já juntou o valor.` });
+    else if (near) out.push({ icon: 'gift', tone: 'accent', html: `Faltam só <b>${money(near.price - near.saved)}</b> para ${esc(near.name)}.` });
     const overdue = S.tasks.filter((t) => !t.done && t.due && t.due < today()).length;
     if (overdue) out.push({ icon: 'alert', tone: 'out', html: `Você tem <b>${plural(overdue, 'tarefa atrasada', 'tarefas atrasadas')}</b>.` });
     const top = S.habits.map((h) => ({ h, s: streak(h) })).sort((a, b) => b.s - a.s)[0];
@@ -993,6 +1254,7 @@ Regras:
         <button type="button" data-act="new-in"><span class="q-ic tone-in">${ic('in')}</span>Entrada</button>
         <button type="button" data-act="new-task"><span class="q-ic tone-info">${ic('tasks')}</span>Tarefa</button>
         <button type="button" data-act="new-habit"><span class="q-ic tone-amber">${ic('flame')}</span>Hábito</button>
+        <button type="button" data-act="new-wish"><span class="q-ic tone-accent">${ic('gift')}</span>Quero comprar</button>
         <button type="button" data-act="new-goal"><span class="q-ic tone-accent">${ic('target')}</span>Meta</button>
         <button type="button" data-act="new-sub"><span class="q-ic tone-info">${ic('repeat')}</span>Assinatura</button>
       </div>
@@ -1004,12 +1266,18 @@ Regras:
       ${recent.length ? `<div class="rows">${recent.map(txRow).join('')}</div>` : emptyState('wallet', 'Sem lançamentos', 'Conte um gasto ao Zeny ou use os atalhos.')}
     </section>`;
 
+    const wl = activeWishes().sort((a, b) => b.saved / b.price - a.saved / a.price).slice(0, 3);
+    const wishCard = `<section class="card">
+      <header class="card-head"><h2>Quero comprar</h2><button type="button" class="link" data-go="wishes">${S.wishes.length ? 'Ver lista' : 'Abrir'} ${ic('right', 'sm')}</button></header>
+      ${wl.length ? `<div class="rows">${wl.map(wishRow).join('')}</div>`
+        : emptyState('gift', 'Nada na lista ainda', 'Diga ao Zeny: "quero comprar uma bicicleta de 1500". Eu aviso quando você juntar o valor.', `<button type="button" class="btn sm ghost" data-act="new-wish">${ic('plus', 'sm')}Adicionar desejo</button>`)}
+    </section>`;
     const goalsCard = S.goals.length ? `<section class="card">
       <header class="card-head"><h2>Metas</h2><button type="button" class="link" data-act="new-goal">${ic('plus', 'sm')}Nova</button></header>
       <div class="rows">${S.goals.map(goalRow).join('')}</div>
     </section>` : '';
 
-    return `${demoBanner()}<div class="grid two">${ask}${hero}${tasksCard}${habitsCard}${insightsCard}${quick}${recentCard}${goalsCard}</div>`;
+    return `${demoBanner()}<div class="grid two">${ask}${hero}${tasksCard}${habitsCard}${wishCard}${insightsCard}${quick}${recentCard}${goalsCard}</div>`;
   }
 
   // ---------- Tela: Finanças ----------
@@ -1234,6 +1502,58 @@ Regras:
     return `${demoBanner()}${seg}<section class="card">${body}</section>`;
   }
 
+  // ---------- Tela: Quero comprar ----------
+  function wishRow(w) {
+    const p = w.price ? Math.min(100, (w.saved / w.price) * 100) : 0;
+    const ready = w.saved >= w.price;
+    return `<button type="button" class="goal" data-act="${ready ? 'wish-buy' : 'wish-save'}" data-id="${w.id}">
+      <span class="top"><span>${esc(w.name)}</span>${ready ? `<span class="pill tone-in">${ic('check')}Pronto para comprar</span>` : `<span class="num">${Math.round(p)}%</span>`}</span>
+      <span class="bar ${ready ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></span>
+      <span class="small muted num">${money(w.saved)} de ${money(w.price)}${ready ? '' : ` · faltam ${money(w.price - w.saved)}`}</span>
+    </button>`;
+  }
+  function wishCard(w) {
+    const p = w.price ? Math.min(100, (w.saved / w.price) * 100) : 0;
+    const ready = w.saved >= w.price;
+    const pace = wishPace(w);
+    return `<section class="card wish ${ready ? 'ready' : ''}">
+      <div class="wish-head">
+        <span class="w-ic">${ic('gift')}</span>
+        <div class="grow"><div class="name">${esc(w.name)}</div><div class="small muted num">${money(w.saved)} de ${money(w.price)}</div></div>
+        ${ready ? `<span class="pill tone-in">${ic('check')}Pronto</span>` : `<span class="pct num">${Math.round(p)}%</span>`}
+      </div>
+      <div class="bar ${ready ? 'done' : ''}"><i style="width:${p.toFixed(1)}%"></i></div>
+      <p class="small ${ready ? 'pos' : 'muted'}">${ready ? `Você já juntou o valor desde ${esc(fmtDate(w.reachedAt || today()))}. Pode comprar!` : `Faltam <b>${money(w.price - w.saved)}</b>${pace ? ` · ${esc(pace)}` : ''}`}</p>
+      <div class="wish-actions">
+        ${ready ? `<button type="button" class="btn sm primary" data-act="wish-buy" data-id="${w.id}">${ic('check', 'sm')}Já comprei</button>` : `<button type="button" class="btn sm primary" data-act="wish-save" data-id="${w.id}">${ic('plus', 'sm')}Guardar</button>`}
+        <button type="button" class="btn sm ghost" data-act="wish-edit" data-id="${w.id}">${ic('edit', 'sm')}Editar</button>
+        ${w.link ? `<a class="btn sm ghost" href="${esc(w.link)}" target="_blank" rel="noopener">Ver produto ${ic('right', 'sm')}</a>` : ''}
+      </div>
+    </section>`;
+  }
+  function viewWishes() {
+    const list = activeWishes().sort((a, b) => (b.saved >= b.price) - (a.saved >= a.price) || b.saved / b.price - a.saved / a.price);
+    const bought = S.wishes.filter((w) => w.bought).sort((a, b) => (b.boughtAt || '').localeCompare(a.boughtAt || ''));
+    const total = list.reduce((a, w) => a + w.price, 0);
+    const saved = list.reduce((a, w) => a + Math.min(w.saved, w.price), 0);
+    const ready = list.filter((w) => w.saved >= w.price).length;
+    const notifLine = notifStatus === 'granted' && S.settings.notify !== false
+      ? `<span class="pill tone-in">${ic('bell')}Avisos ativados</span>`
+      : notifStatus === 'default' ? `<button type="button" class="btn sm ghost" data-act="notif-enable">${ic('bell', 'sm')}Ativar avisos no celular</button>`
+      : `<span class="small muted">${ic('bell', 'sm')} O aviso aparece aqui no app quando você atingir o valor.</span>`;
+    return `${demoBanner()}<div class="grid">
+      <div class="stats">
+        <div class="stat bal"><span class="lbl">${ic('gift', 'sm')}Na lista</span><b>${money(total)}</b></div>
+        <div class="stat"><span class="lbl">${ic('wallet', 'sm')}Guardado</span><b class="pos">${money(saved)}</b></div>
+        <div class="stat"><span class="lbl">${ic('check', 'sm')}Prontos</span><b>${ready} de ${list.length}</b></div>
+      </div>
+      <div class="notif-line">${notifLine}</div>
+      ${list.length ? `<div class="grid two">${list.map(wishCard).join('')}</div>`
+        : `<section class="card">${emptyState('gift', 'O que você quer comprar?', 'Adicione um item com o preço e vá guardando aos poucos. Quando juntar o valor, o Zeny te avisa.', `<button type="button" class="btn primary" data-act="new-wish">${ic('plus', 'sm')}Adicionar desejo</button>`)}</section>`}
+      ${bought.length ? `<section class="card"><header class="card-head"><h2>Já comprados</h2><span class="sub">${bought.length}</span></header><div class="rows">${bought.map((w) => `<button type="button" class="row done" data-act="wish-edit" data-id="${w.id}"><span class="cat-ic tone-in">${ic('check')}</span><span class="grow"><span class="title">${esc(w.name)}</span><span class="meta">Comprado ${esc(fmtDate(w.boughtAt))}</span></span><span class="amount">${money(w.paid || w.price)}</span></button>`).join('')}</div></section>` : ''}
+    </div>`;
+  }
+
   // ---------- Tela: Planos ----------
   function priceBlock(p, billing) {
     const monthly = Number.isFinite(p.monthly) ? p.monthly : null;
@@ -1333,6 +1653,7 @@ Regras:
         <header class="card-head"><h2>Assistente</h2></header>
         <div class="ai-status ${mode !== 'local' ? 'on' : ''}"><span class="dot"></span><div><div class="title">${AI_LABEL[mode]}</div><div class="desc small muted">${mode === 'claude' ? 'Respostas pelo Claude, usando a sua conta do claude.ai.' : mode === 'server' ? 'Respostas pelo servidor do Zeny.' : 'Entende comandos comuns em português, direto no aparelho.'}</div></div></div>
         <div class="set-row"><div class="grow"><div class="title">Responder em voz alta</div><div class="desc">O Zeny lê as respostas.</div></div><button type="button" class="switch ${S.settings.speak ? 'on' : ''}" data-act="speak" role="switch" aria-checked="${!!S.settings.speak}" aria-label="Responder em voz alta"></button></div>
+        <div class="set-row"><div class="grow"><div class="title">Avisos de meta atingida</div><div class="desc">${notifStatus === 'granted' ? 'Você recebe uma notificação quando juntar o valor de um desejo ou meta.' : notifStatus === 'denied' ? 'Bloqueados. Libere as notificações nas configurações do navegador ou do celular.' : notifStatus === 'default' ? 'Receba uma notificação quando juntar o valor de um desejo ou meta.' : 'Aqui o aviso aparece dentro do app.'}</div></div>${notifStatus === 'granted' ? `<button type="button" class="switch ${S.settings.notify !== false ? 'on' : ''}" data-act="notif-toggle" role="switch" aria-checked="${S.settings.notify !== false}" aria-label="Avisos de meta atingida"></button>` : notifStatus === 'default' ? `<button type="button" class="btn sm ghost" data-act="notif-enable">${ic('bell', 'sm')}Ativar</button>` : ''}</div>
         <div class="set-row"><div class="grow"><div class="title">Servidor da IA</div><div class="desc">Opcional. Endereço do servidor que guarda a chave da API.</div></div><input type="url" id="setServer" data-set="serverUrl" value="${esc(S.settings.serverUrl || CFG.serverUrl || '')}" placeholder="https://…workers.dev"></div>
       </section>
       <section class="card">
@@ -1356,6 +1677,7 @@ Regras:
     switch (view) {
       case 'home': return { t: `${greeting()}${name ? ', ' + esc(name) : ''}`, s: esc(cap(longDate(new Date()))), a: mobileBtns };
       case 'finance': return { t: 'Finanças', s: 'Seu dinheiro, mês a mês', a: `<button type="button" class="btn primary sm" data-act="new-out">${ic('plus', 'sm')}<span class="hide-xs">Lançamento</span></button>${mobileBtns}` };
+      case 'wishes': return { t: 'Quero comprar', s: 'Junte dinheiro para o que você quer. O Zeny avisa quando der.', a: `<button type="button" class="btn primary sm" data-act="new-wish">${ic('plus', 'sm')}<span class="hide-xs">Desejo</span></button>${mobileBtns}` };
       case 'habits': return { t: 'Hábitos', s: S.habits.length ? `${doneH} de ${S.habits.length} feitos hoje` : 'Construa sua rotina, um dia de cada vez', a: `<button type="button" class="btn primary sm" data-act="new-habit">${ic('plus', 'sm')}<span class="hide-xs">Hábito</span></button>${mobileBtns}` };
       case 'tasks': return { t: 'Tarefas', s: open ? plural(open, 'tarefa pendente', 'tarefas pendentes') : 'Nada pendente', a: `<button type="button" class="btn primary sm" data-act="new-task">${ic('plus', 'sm')}<span class="hide-xs">Tarefa</span></button>${mobileBtns}` };
       case 'plans': return { t: 'Planos', s: 'Escolha como o Zeny vai te acompanhar', a: `<button type="button" class="icon-btn only-mobile" data-go="home" aria-label="Voltar">${ic('left')}</button>` };
@@ -1363,7 +1685,7 @@ Regras:
     }
     return { t: 'Zeny', s: '', a: '' };
   }
-  const VIEW_FN = { home: viewHome, finance: viewFinance, habits: viewHabits, tasks: viewTasks, plans: viewPlans, settings: viewSettings };
+  const VIEW_FN = { home: viewHome, finance: viewFinance, wishes: viewWishes, habits: viewHabits, tasks: viewTasks, plans: viewPlans, settings: viewSettings };
 
   function renderMain() {
     try {
@@ -1433,10 +1755,11 @@ Regras:
       const f = fields[i];
       if (f.half && fields[i + 1] && fields[i + 1].half) { body += `<div class="field-row">${fieldHtml(f)}${fieldHtml(fields[i + 1])}</div>`; i++; } else body += fieldHtml(f);
     }
-    form.innerHTML = `<h2 id="modalTitle">${esc(title)}</h2>${opts.intro ? `<p class="intro">${esc(opts.intro)}</p>` : ''}${body}
+    dlg.classList.toggle('celebrate', !!opts.celebrate);
+    form.innerHTML = `${opts.celebrate ? `<div class="burst" aria-hidden="true">${ic('gift', 'lg')}</div>` : ''}<h2 id="modalTitle">${esc(title)}</h2>${opts.intro ? `<p class="intro">${esc(opts.intro)}</p>` : ''}${body}
       <div class="actions">
         ${opts.danger ? `<button type="button" class="btn danger" data-close="delete" aria-label="${esc(opts.danger)}" title="${esc(opts.danger)}">${ic('trash', 'sm')}</button>` : ''}
-        <button type="button" class="btn ghost" data-close="cancel">Cancelar</button>
+        <button type="button" class="btn ghost" data-close="cancel">${esc(opts.cancel || 'Cancelar')}</button>
         <button type="submit" class="btn primary" value="ok">${esc(opts.ok || 'Salvar')}</button>
       </div>`;
     dlg.returnValue = '';
@@ -1593,6 +1916,61 @@ Regras:
     undoToast(existing ? 'Assinatura atualizada' : 'Assinatura criada', id);
   }
 
+  async function wishForm(existing) {
+    if (!existing && !underLimit('wishes', activeWishes().length)) { gate(`Seu plano permite até ${limitOf('wishes')} desejos de compra.`); return; }
+    const w = existing || { name: '', price: '', saved: 0, link: '' };
+    const fields = [
+      { name: 'name', label: 'O que você quer comprar?', value: w.name, required: true, maxlength: 60, placeholder: 'Ex.: Bicicleta elétrica' },
+      { name: 'price', label: 'Preço (R$)', type: 'number', step: '0.01', min: '1', inputmode: 'decimal', value: w.price, required: true, half: true },
+      { name: 'saved', label: existing ? 'Já guardado (R$)' : 'Já tenho guardado (R$)', type: 'number', step: '0.01', min: '0', inputmode: 'decimal', value: w.saved || '', half: true },
+      { name: 'link', label: 'Link do produto (opcional)', type: 'url', value: w.link, placeholder: 'https://…' },
+    ];
+    const r = await openForm(existing ? 'Editar desejo' : 'Quero comprar', fields, { intro: existing ? '' : 'Vá guardando aos poucos. Quando você juntar o valor, o Zeny te avisa.', danger: existing ? 'Excluir desejo' : null, ok: existing ? 'Salvar' : 'Adicionar' });
+    if (!r) return;
+    if (r.action === 'delete') {
+      const { id } = commit(() => { S.wishes = S.wishes.filter((x) => x.id !== existing.id); });
+      undoToast('Desejo excluído', id);
+      return;
+    }
+    const v = r.values;
+    const price = Math.abs(Number(v.price));
+    if (!v.name.trim() || !price) { toast('Confira o nome e o preço.'); return; }
+    const saved = Math.max(0, Number(v.saved) || 0);
+    const link = /^https?:\/\//.test(v.link.trim()) ? v.link.trim() : '';
+    if (!existing) {
+      const { undoId } = applyActions([{ type: 'add_wish', name: v.name, price, saved, link }]);
+      if (undoId) undoToast('Desejo adicionado', undoId);
+      return;
+    }
+    const { id } = commit(() => {
+      const x = S.wishes.find((q) => q.id === existing.id);
+      if (!x) return;
+      if (saved !== x.saved) x.deposits.push({ date: today(), amount: saved - x.saved });
+      Object.assign(x, { name: cap(v.name.trim()), price, saved, link });
+    });
+    undoToast('Desejo atualizado', id);
+  }
+  async function depositForm(w) {
+    const r = await openForm(`Guardar para ${w.name}`, [
+      { name: 'amount', label: 'Quanto você guardou? (R$)', type: 'number', step: '0.01', min: '0.01', inputmode: 'decimal', required: true, placeholder: 'Ex.: 200' },
+      { name: 'mode', label: 'Operação', type: 'select', value: 'add', options: [['add', 'Guardar'], ['remove', 'Retirar']] },
+    ], { intro: `Você tem ${money(w.saved)} de ${money(w.price)}. Faltam ${money(Math.max(0, w.price - w.saved))}.`, ok: 'Confirmar' });
+    if (!r) return;
+    const amount = Math.abs(Number(r.values.amount));
+    if (!amount) return;
+    const { undoId } = applyActions([{ type: 'add_to_wish', id: w.id, name: w.name, amount: r.values.mode === 'remove' ? -amount : amount }]);
+    if (undoId) undoToast(r.values.mode === 'remove' ? 'Valor retirado' : `Guardado para ${w.name}`, undoId);
+  }
+  async function buyForm(w) {
+    const r = await openForm(`Comprei: ${w.name}`, [
+      { name: 'paid', label: 'Quanto você pagou? (R$)', type: 'number', step: '0.01', min: '0.01', inputmode: 'decimal', value: w.price, required: true },
+      { name: 'expense', label: 'Lançar como gasto em Finanças', type: 'checkbox', value: true },
+    ], { intro: 'O item vai para a lista de comprados.', ok: 'Registrar compra' });
+    if (!r) return;
+    const { undoId } = applyActions([{ type: 'buy_wish', id: w.id, name: w.name, price_paid: Number(r.values.paid) || w.price, register_expense: !!r.values.expense }]);
+    if (undoId) undoToast(`${w.name} comprado. Parabéns!`, undoId);
+  }
+
   async function budgetForm() {
     const r = await openForm('Orçamento do mês', [
       { name: 'budget', label: 'Quanto você quer gastar por mês (R$)', type: 'number', step: '50', min: '0', inputmode: 'decimal', value: Number(S.settings.budget) || '', placeholder: 'Ex.: 3000' },
@@ -1716,6 +2094,17 @@ Regras:
       { id: uid(), title: 'Renovar a CNH', prio: 'baixa', due: '', time: '', done: false, doneAt: null },
       { id: uid(), title: 'Revisar as contas do mês', prio: 'media', due: d(-2), time: '', done: true, doneAt: d(-1) },
     ];
+    const dep = (n, days) => Array.from({ length: n }, (_, k) => ({ date: d(-days + k * Math.floor(days / n)), amount: 0 }));
+    const mkWish = (name, price, saved, extra = {}) => {
+      const deposits = dep(6, 80).map((x) => ({ ...x, amount: Math.round((saved / 6) * 100) / 100 }));
+      return { id: uid(), name, price, saved, link: '', created: d(-80), reachedAt: null, notified: saved >= price, bought: false, boughtAt: null, paid: 0, deposits, ...extra };
+    };
+    S.wishes = [
+      mkWish('iPhone 16', 5200, 3100),
+      mkWish('Bicicleta elétrica', 3800, 3650),
+      mkWish('Fone com cancelamento de ruído', 1200, 1200, { reachedAt: d(-2) }),
+      mkWish('Air fryer', 450, 450, { bought: true, boughtAt: d(-20), paid: 429.9, notified: true }),
+    ];
     S.settings.budget = 3500;
     save();
   }
@@ -1770,6 +2159,12 @@ Regras:
     'new-habit': () => habitForm(null),
     'new-goal': () => goalForm(null),
     'new-sub': () => subForm(null),
+    'new-wish': () => wishForm(null),
+    'wish-edit': (id) => { const x = S.wishes.find((t) => t.id === id); if (x) wishForm(x); },
+    'wish-save': (id) => { const x = S.wishes.find((t) => t.id === id); if (x) depositForm(x); },
+    'wish-buy': (id) => { const x = S.wishes.find((t) => t.id === id); if (x) buyForm(x); },
+    'notif-enable': () => requestNotifications(),
+    'notif-toggle': () => { S.settings.notify = S.settings.notify === false; save(); renderMain(); toast(S.settings.notify ? 'Avisos ativados' : 'Avisos desligados'); },
     'tx-edit': (id) => { const x = S.tx.find((t) => t.id === id); if (x) txForm(x); },
     'task-edit': (id) => { const x = S.tasks.find((t) => t.id === id); if (x) taskForm(x); },
     'habit-edit': (id) => { const x = S.habits.find((t) => t.id === id); if (x) habitForm(x); },
@@ -1907,6 +2302,7 @@ Regras:
   renderSuggestions();
   setComposer();
   connectClaude();
+  refreshNotifStatus().then(() => { if (current === 'settings' || current === 'wishes') renderMain(); });
   if (!S.settings.onboarded) showOnboarding();
   else welcome();
 

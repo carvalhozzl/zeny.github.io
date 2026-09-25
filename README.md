@@ -7,6 +7,15 @@ Você fala (ou escreve) e o Zeny entende, organiza e lembra:
 - **Tarefas**: prioridade, prazo e horário, com aviso das tarefas do dia ao abrir o app.
 - **Voz**: toque no 🎤 e fale em português. O Zeny também pode responder em voz alta.
 
+## Quero comprar (metas de compra com aviso)
+
+A pessoa cadastra o que quer comprar e o preço ("quero comprar uma bicicleta de 1500"), vai guardando aos poucos ("guardei 200 para a bicicleta") e o Zeny mostra quanto falta e em quanto tempo, no ritmo atual, ela chega lá. Quando o valor é atingido:
+
+- aparece uma notificação no celular (app Android) ou no navegador, se a pessoa permitiu;
+- o Zeny comemora no chat e abre a opção de registrar a compra, que pode virar um gasto em Finanças.
+
+As metas de economia (reserva, viagem) também avisam quando são concluídas. A IA entende tudo isso pelas ações `add_wish`, `add_to_wish` e `buy_wish`.
+
 ## Estrutura
 
 | Pasta | O que é |

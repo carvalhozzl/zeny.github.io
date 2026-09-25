@@ -1,5 +1,5 @@
 // Cache simples para o Zeny funcionar offline.
-const CACHE = 'zeny-v3';
+const CACHE = 'zeny-v4';
 const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', (e) => {
