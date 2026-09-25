@@ -58,3 +58,12 @@ jobs:
         run: |
           echo "$STRIPE_SECRET_KEY" | npx wrangler secret put STRIPE_SECRET_KEY
           if [ -n "$STRIPE_WEBHOOK_SECRET" ]; then echo "$STRIPE_WEBHOOK_SECRET" | npx wrangler secret put STRIPE_WEBHOOK_SECRET; fi
+      - name: Testar servidor no ar
+        run: |
+          URL="https://zeny-server.danieli-breves.workers.dev"
+          sleep 5
+          echo "Saúde: $(curl -fsS "$URL/health")"
+          RESP=$(curl -sS -X POST "$URL/chat" -H 'Origin: https://carvalhozzl.github.io' -H 'content-type: application/json' \
+            -d '{"message":"gastei 30 no uber e recebi 100 de um cliente","history":[],"context":"{\"hoje\":\"2026-09-25\"}","clientId":"00000000000000000000000000000000"}')
+          echo "Resposta da IA: $RESP"
+          echo "$RESP" | grep -q '"reply"' || { echo "::error::A IA não respondeu como esperado."; exit 1; }

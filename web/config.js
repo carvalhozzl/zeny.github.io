@@ -2,7 +2,7 @@
 window.ZENY_CONFIG = {
   // Endereço do servidor da IA (Cloudflare Worker), que guarda a chave da API.
   // Ex.: 'https://zeny-server.SEU-USUARIO.workers.dev'. Vazio = modo local.
-  serverUrl: '',
+  serverUrl: 'https://zeny-server.danieli-breves.workers.dev',
 
   // Contato mostrado em Ajustes e na tela de planos. Vazio = não mostrar.
   supportEmail: '',
