@@ -157,3 +157,4 @@ dialog .actions button[value="ok"] { background: var(--accent); color: #fff; fon
 
 .toast { position: fixed; left: 50%; bottom: 90px; transform: translate(-50%, 20px); background: var(--surface-2); padding: 10px 16px; border-radius: 12px; opacity: 0; transition: .25s; pointer-events: none; max-width: 90vw; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+@media (prefers-reduced-motion: reduce) { .msg, .composer .mic.rec { animation: none; } }

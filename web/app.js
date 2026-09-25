@@ -518,7 +518,10 @@
       const v = $('#input').value;
       if (v.trim()) { $('#input').value = ''; handleUser(v); }
     };
-    rec.onerror = (e) => { if (e.error !== 'no-speech' && e.error !== 'aborted') toast('Erro no microfone: ' + e.error); };
+    rec.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') toast('O microfone está bloqueado nesta página. Libere o acesso ou digite a mensagem.');
+      else if (e.error !== 'no-speech' && e.error !== 'aborted') toast('Erro no microfone: ' + e.error);
+    };
     btn.addEventListener('click', () => {
       if (listening) { rec.stop(); return; }
       $('#input').value = '';
@@ -596,12 +599,12 @@
   function renderAll() { renderFinance(); renderHabits(); renderTasks(); }
 
   // ---------- Modal genérico ----------
-  function openForm(title, fields) {
+  function openForm(title, fields, okLabel = 'Salvar', intro = '') {
     const dlg = $('#modal'), form = $('#modalForm');
-    form.innerHTML = `<h2>${esc(title)}</h2>` + fields.map((f) => {
+    form.innerHTML = `<h2>${esc(title)}</h2>` + (intro ? `<p class="muted">${esc(intro)}</p>` : '') + fields.map((f) => {
       if (f.type === 'select') return `<label class="field">${esc(f.label)}<select name="${f.name}">${f.options.map(([v, l]) => `<option value="${v}" ${v === f.value ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
       return `<label class="field">${esc(f.label)}<input name="${f.name}" type="${f.type || 'text'}" value="${esc(f.value ?? '')}" ${f.step ? `step="${f.step}"` : ''} ${f.required ? 'required' : ''}></label>`;
-    }).join('') + '<div class="actions"><button value="cancel" formnovalidate>Cancelar</button><button value="ok">Salvar</button></div>';
+    }).join('') + `<div class="actions"><button value="cancel" formnovalidate>Cancelar</button><button value="ok">${esc(okLabel)}</button></div>`;
     dlg.showModal();
     return new Promise((resolve) => {
       dlg.onclose = () => {
@@ -610,6 +613,9 @@
       };
     });
   }
+
+  // Confirmação dentro do app (o confirm() do navegador nem sempre aparece).
+  const askConfirm = async (title, text, okLabel) => (await openForm(title, [], okLabel, text)) !== null;
 
   // ---------- Eventos ----------
   function go(view) {
@@ -641,11 +647,11 @@
       renderTasks();
     }));
 
-    document.addEventListener('click', (e) => {
+    document.addEventListener('click', async (e) => {
       const del = e.target.closest('[data-del]');
       if (del) {
         const [coll, id] = del.dataset.del.split(':');
-        if (!confirm('Excluir este item?')) return;
+        if (!(await askConfirm('Excluir item', 'Esta ação não pode ser desfeita.', 'Excluir'))) return;
         S[coll] = S[coll].filter((x) => x.id !== id);
         save(); renderAll();
         return;
@@ -729,8 +735,8 @@
       } catch (err) { toast('Arquivo inválido'); }
       e.target.value = '';
     };
-    $('#clearData').onclick = () => {
-      if (!confirm('Apagar todos os dados do Zeny neste aparelho?')) return;
+    $('#clearData').onclick = async () => {
+      if (!(await askConfirm('Apagar tudo', 'Todos os lançamentos, hábitos, tarefas e a conversa serão apagados deste aparelho.', 'Apagar tudo'))) return;
       const settings = S.settings;
       S = defaults(); S.settings = settings;
       save(); renderChat(); renderAll(); welcome();
