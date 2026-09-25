@@ -50,7 +50,7 @@ Sem servidor configurado, o Zeny funciona no **modo local**. Ele entende comando
 
 1. No repositório, abra **Settings → Pages** e, em *Source*, escolha **GitHub Actions**.
 2. Faça qualquer envio para a branch `main` (ou rode o workflow *Publicar site* em **Actions**).
-3. O site fica em `https://carvalhozzl.github.io/zeny/`.
+3. O site fica em `https://carvalhozzl.github.io/zeny-app/`.
 
 ### 2. Servidor da IA (Cloudflare, plano gratuito)
 
