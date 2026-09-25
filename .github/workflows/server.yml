@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     # Só roda depois que os segredos do Cloudflare forem configurados.
     if: ${{ vars.DEPLOY_SERVER == 'true' }}
+    env:
+      HAS_STRIPE: ${{ secrets.STRIPE_SECRET_KEY != '' }}
     defaults:
       run:
         working-directory: server
@@ -52,7 +54,6 @@ jobs:
       - name: Gravar chaves da Stripe como segredo
         if: ${{ env.HAS_STRIPE == 'true' }}
         env:
-          HAS_STRIPE: ${{ secrets.STRIPE_SECRET_KEY != '' }}
           STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
           STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
         run: |
