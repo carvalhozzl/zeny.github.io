@@ -3,14 +3,14 @@
   "appName": "Zeny",
   "webDir": "web",
   "android": {
-    "backgroundColor": "#0B7A66"
+    "backgroundColor": "#07060A"
   },
   "server": {
     "androidScheme": "https"
   },
   "plugins": {
     "LocalNotifications": {
-      "iconColor": "#0B7A66"
+      "iconColor": "#9B6BFF"
     }
   }
 }

@@ -105,7 +105,7 @@
 
   // ---------- Estado ----------
   const defaultSettings = () => ({
-    serverUrl: '', speak: false, userName: '', theme: 'system', budget: 0,
+    serverUrl: '', speak: false, userName: '', theme: 'dark', budget: 0,
     persona: 'padrao', voiceStyle: 'padrao', voiceURI: '',
     onboarded: false, plan: PLANS[0].id, billing: 'annual', lastView: 'home',
   });
@@ -125,6 +125,7 @@
     s.demo = !!d.demo;
     s.usage = d.usage && typeof d.usage === 'object' ? { month: String(d.usage.month || ''), ai: Number(d.usage.ai) || 0 } : s.usage;
     s.settings = Object.assign(defaultSettings(), d.settings || {});
+    if (s.settings.theme !== 'light') s.settings.theme = 'dark'; // o tema "Sistema" saiu; preto com roxo é o padrão
     if (!d.v && (s.tx.length || s.chat.length || s.tasks.length || s.habits.length)) s.settings.onboarded = true;
 
     s.tx = s.tx.filter((t) => t && Number.isFinite(Number(t.amount)) && isYmd(t.date)).map((t) => ({
@@ -1745,8 +1746,8 @@ Regras:
       </section>
       <section class="card">
         <header class="card-head"><h2>Aparência</h2></header>
-        <div class="set-row"><div class="grow"><div class="title">Tema</div><div class="desc">Sistema segue a configuração do seu aparelho.</div></div>
-          <div class="seg" role="group" aria-label="Tema">${[['system', 'Sistema'], ['light', 'Claro'], ['dark', 'Escuro']].map(([k, l]) => `<button type="button" class="${th === k ? 'on' : ''}" data-act="theme" data-id="${k}">${l}</button>`).join('')}</div></div>
+        <div class="set-row"><div class="grow"><div class="title">Tema</div><div class="desc">Preto com roxo é o visual padrão do Zeny.</div></div>
+          <div class="seg" role="group" aria-label="Tema">${[['dark', 'Escuro'], ['light', 'Claro']].map(([k, l]) => `<button type="button" class="${th === k ? 'on' : ''}" data-act="theme" data-id="${k}">${l}</button>`).join('')}</div></div>
       </section>
       <section class="card">
         <header class="card-head"><h2>Finanças</h2></header>

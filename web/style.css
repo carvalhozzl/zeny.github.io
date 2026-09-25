@@ -1,34 +1,36 @@
-/* Zeny — identidade: jade calmo, âmbar para conquistas, tipografia Bricolage + Figtree. */
+/* Zeny — identidade: preto profundo com roxo elétrico, âmbar para conquistas.
+   Tema escuro é o padrão; o claro só entra quando escolhido nos Ajustes. */
 
 :root {
-  --bg: #F1F4F2;
-  --surface: #FFFFFF;
-  --surface-2: #F6F8F7;
-  --sunken: #E9EEEB;
-  --line: #E1E7E4;
-  --line-strong: #CBD5D1;
-  --ink: #12201C;
-  --ink-2: #3A4A45;
-  --muted: #62726C;
-  --accent: #0B7A66;
-  --accent-hover: #09695A;
+  --bg: #07060A;
+  --surface: #111017;
+  --surface-2: #18161F;
+  --sunken: #0C0B11;
+  --line: #231F2E;
+  --line-strong: #362F46;
+  --ink: #F1EDF8;
+  --ink-2: #C7BFDA;
+  --muted: #8F87A6;
+  --accent: #9B6BFF;
+  --accent-hover: #B18CFF;
   --accent-ink: #FFFFFF;
-  --accent-soft: #DCEFEA;
-  --hero: #0C5F50;
-  --hero-ink: #F2FBF8;
-  --hero-muted: #A9D6CB;
-  --hero-track: rgba(255, 255, 255, .18);
-  --amber: #D98A12;
-  --amber-soft: #FBEFD9;
-  --in: #16895A;
-  --in-soft: #DDF3E8;
-  --out: #CF4A3F;
-  --out-soft: #FBE4E1;
-  --info: #2F6BD8;
-  --info-soft: #E1EAFB;
-  --scrim: rgba(12, 22, 19, .45);
-  --shadow: 0 1px 2px rgba(18, 32, 28, .05), 0 10px 28px -14px rgba(18, 32, 28, .22);
-  --shadow-lg: 0 24px 60px -20px rgba(18, 32, 28, .35);
+  --accent-soft: #231638;
+  --hero: radial-gradient(120% 140% at 100% 0%, #5B2BC2 0%, #2A1257 45%, #140A26 100%);
+  --hero-ink: #F6F1FF;
+  --hero-muted: #BFA9EE;
+  --hero-track: rgba(255, 255, 255, .16);
+  --amber: #F0AE45;
+  --amber-soft: #33260F;
+  --in: #3CC98A;
+  --in-soft: #0F2E1F;
+  --out: #F07366;
+  --out-soft: #36171A;
+  --info: #7DA2F5;
+  --info-soft: #17213F;
+  --glow: rgba(155, 107, 255, .45);
+  --scrim: rgba(0, 0, 0, .65);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -14px rgba(0, 0, 0, .8);
+  --shadow-lg: 0 24px 60px -20px rgba(0, 0, 0, .9);
 
   --f-display: 'Bricolage Grotesque', 'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --f-body: 'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -36,59 +38,22 @@
   --r: 16px;
   --r-lg: 22px;
   --tab-h: 64px;
-  color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0A1110; --surface: #111A18; --surface-2: #16211F; --sunken: #0D1614;
-    --line: #1F2C29; --line-strong: #2C3D39; --ink: #E4EEEA; --ink-2: #BCCAC5; --muted: #8A9B96;
-    --accent: #36C3A6; --accent-hover: #4FD3B6; --accent-ink: #062520; --accent-soft: #123A33;
-    --hero: #0F3F36; --hero-ink: #EAF7F3; --hero-muted: #93C4B8;
-    --amber: #F0AE45; --amber-soft: #3A2C12; --in: #3CC98A; --in-soft: #10331F;
-    --out: #F07366; --out-soft: #3A1916; --info: #6D9CF2; --info-soft: #172646;
-    --scrim: rgba(0, 0, 0, .6);
-    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px -14px rgba(0, 0, 0, .7);
-    --shadow-lg: 0 24px 60px -20px rgba(0, 0, 0, .8);
-    color-scheme: dark;
-  }
-}
-:root[data-theme="dark"] {
-  --bg: #0A1110; --surface: #111A18; --surface-2: #16211F; --sunken: #0D1614;
-  --line: #1F2C29; --line-strong: #2C3D39; --ink: #E4EEEA; --ink-2: #BCCAC5; --muted: #8A9B96;
-  --accent: #36C3A6; --accent-hover: #4FD3B6; --accent-ink: #062520; --accent-soft: #123A33;
-  --hero: #0F3F36; --hero-ink: #EAF7F3; --hero-muted: #93C4B8;
-  --amber: #F0AE45; --amber-soft: #3A2C12; --in: #3CC98A; --in-soft: #10331F;
-  --out: #F07366; --out-soft: #3A1916; --info: #6D9CF2; --info-soft: #172646;
-  --scrim: rgba(0, 0, 0, .6);
-  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px -14px rgba(0, 0, 0, .7);
-  --shadow-lg: 0 24px 60px -20px rgba(0, 0, 0, .8);
   color-scheme: dark;
 }
-/* Escolha feita nos Ajustes do próprio Zeny (vem depois, então vence). */
+/* Tema claro, escolhido nos Ajustes do Zeny. */
 :root[data-zeny-theme="light"] {
-  --bg: #F1F4F2; --surface: #FFFFFF; --surface-2: #F6F8F7; --sunken: #E9EEEB;
-  --line: #E1E7E4; --line-strong: #CBD5D1; --ink: #12201C; --ink-2: #3A4A45; --muted: #62726C;
-  --accent: #0B7A66; --accent-hover: #09695A; --accent-ink: #FFFFFF; --accent-soft: #DCEFEA;
-  --hero: #0C5F50; --hero-ink: #F2FBF8; --hero-muted: #A9D6CB;
+  --bg: #F5F3FA; --surface: #FFFFFF; --surface-2: #F8F6FC; --sunken: #ECE8F4;
+  --line: #E4DFEE; --line-strong: #CFC7DF; --ink: #17122A; --ink-2: #3F3656; --muted: #6D6485;
+  --accent: #7C3AED; --accent-hover: #6D28D9; --accent-ink: #FFFFFF; --accent-soft: #EDE5FD;
+  --hero: radial-gradient(120% 140% at 100% 0%, #6D3BE0 0%, #3A1A86 50%, #221049 100%);
+  --hero-ink: #F8F4FF; --hero-muted: #CDBBF3;
   --amber: #D98A12; --amber-soft: #FBEFD9; --in: #16895A; --in-soft: #DDF3E8;
   --out: #CF4A3F; --out-soft: #FBE4E1; --info: #2F6BD8; --info-soft: #E1EAFB;
-  --scrim: rgba(12, 22, 19, .45);
-  --shadow: 0 1px 2px rgba(18, 32, 28, .05), 0 10px 28px -14px rgba(18, 32, 28, .22);
-  --shadow-lg: 0 24px 60px -20px rgba(18, 32, 28, .35);
+  --glow: rgba(124, 58, 237, .35);
+  --scrim: rgba(23, 18, 42, .45);
+  --shadow: 0 1px 2px rgba(23, 18, 42, .05), 0 10px 28px -14px rgba(23, 18, 42, .22);
+  --shadow-lg: 0 24px 60px -20px rgba(23, 18, 42, .35);
   color-scheme: light;
-}
-:root[data-zeny-theme="dark"] {
-  --bg: #0A1110; --surface: #111A18; --surface-2: #16211F; --sunken: #0D1614;
-  --line: #1F2C29; --line-strong: #2C3D39; --ink: #E4EEEA; --ink-2: #BCCAC5; --muted: #8A9B96;
-  --accent: #36C3A6; --accent-hover: #4FD3B6; --accent-ink: #062520; --accent-soft: #123A33;
-  --hero: #0F3F36; --hero-ink: #EAF7F3; --hero-muted: #93C4B8;
-  --amber: #F0AE45; --amber-soft: #3A2C12; --in: #3CC98A; --in-soft: #10331F;
-  --out: #F07366; --out-soft: #3A1916; --info: #6D9CF2; --info-soft: #172646;
-  --scrim: rgba(0, 0, 0, .6);
-  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px -14px rgba(0, 0, 0, .7);
-  --shadow-lg: 0 24px 60px -20px rgba(0, 0, 0, .8);
-  color-scheme: dark;
 }
 
 /* ---------- Base ---------- */
@@ -157,7 +122,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .tabbar .tab-zeny { position: relative; }
 .tabbar .tab-zeny .mark {
   width: 52px; height: 52px; transform: translateY(-12px);
-  filter: drop-shadow(0 8px 14px rgba(11, 122, 102, .35));
+  filter: drop-shadow(0 8px 16px var(--glow));
   transition: transform .2s ease;
 }
 .tabbar .tab-zeny:active .mark { transform: translateY(-10px) scale(.96); }
