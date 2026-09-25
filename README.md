@@ -93,7 +93,24 @@ npx wrangler deploy
 
 Para mudar o modelo ou o limite de mensagens, edite `server/wrangler.toml`.
 
-### 3. App Android
+### 3. Assinaturas com a Stripe
+
+Com a Stripe ligada, os botões dos planos abrem o pagamento seguro da Stripe, o plano é ativado sozinho quando o pagamento é confirmado e **a IA só responde para quem tem assinatura ativa**, respeitando o limite de mensagens de cada plano. Sem assinatura, o app continua funcionando no modo local.
+
+1. Na Stripe, pegue a **chave secreta** em *Desenvolvedores → Chaves de API* (`sk_live_...`; use `sk_test_...` para testar sem cobrar de verdade).
+2. Em *Desenvolvedores → Webhooks*, clique em **Adicionar destino** com:
+   - URL: `https://zeny-server.SEU-USUARIO.workers.dev/stripe/webhook` (o endereço do servidor da etapa 2)
+   - Eventos: `checkout.session.completed`, `customer.subscription.updated` e `customer.subscription.deleted`
+   - Copie o **segredo de assinatura** (`whsec_...`).
+3. No GitHub, em **Settings → Secrets and variables → Actions → Secrets**, crie `STRIPE_SECRET_KEY` e `STRIPE_WEBHOOK_SECRET`.
+4. Rode de novo o workflow *Publicar servidor da IA*.
+5. Na Stripe, em *Configurações → Portal do cliente*, ative o portal. É por ele que a pessoa cancela ou troca o cartão (botão **Gerenciar** em Ajustes).
+
+Os preços cobrados ficam em `server/wrangler.toml` (`PLANS`, em centavos) e os mostrados no app em `web/config.js`. Mantenha os dois iguais. Para ativar o plano anual, preencha `annual` nos dois.
+
+Cada aparelho tem um **código da assinatura** (Ajustes → Assinatura). Para usar a mesma assinatura em outro aparelho, copie o código e use **Usar código** no aparelho novo.
+
+### 4. App Android
 
 Cada envio para a `main` gera o app automaticamente em **Actions → App Android**:
 

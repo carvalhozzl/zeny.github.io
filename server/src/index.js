@@ -5,11 +5,18 @@
  * específico do Zeny (POST /chat). O prompt, o modelo e o limite de tokens
  * ficam aqui, então o app não consegue usar a chave para outra coisa.
  *
+ * Também cuida das assinaturas pela Stripe: cria o pagamento, recebe a
+ * confirmação (webhook), guarda o plano de cada pessoa e só libera a IA para
+ * quem tem assinatura ativa (quando a Stripe está configurada).
+ *
  * Variáveis:
- *   ANTHROPIC_API_KEY  (segredo)  chave da API do Claude
- *   ALLOWED_ORIGINS    (var)      origens permitidas, separadas por vírgula
- *   MODEL              (var)      modelo do Claude (padrão: claude-sonnet-5)
- *   RATE_LIMIT         (var)      mensagens por minuto por IP (padrão: 20)
+ *   ANTHROPIC_API_KEY      (segredo)  chave da API do Claude
+ *   STRIPE_SECRET_KEY      (segredo)  chave secreta da Stripe (sk_live_... ou sk_test_...)
+ *   STRIPE_WEBHOOK_SECRET  (segredo)  segredo do webhook da Stripe (whsec_...)
+ *   ALLOWED_ORIGINS        (var)      origens permitidas, separadas por vírgula
+ *   MODEL                  (var)      modelo do Claude (padrão: claude-sonnet-5)
+ *   RATE_LIMIT             (var)      mensagens por minuto por IP (padrão: 20)
+ *   PLANS                  (var)      preços (em centavos) e limites de IA de cada plano, em JSON
  */
 
 const SYSTEM_PROMPT = `Você é o Zeny, um assistente pessoal brasileiro, simpático e objetivo, que organiza finanças (pessoais e da empresa), hábitos e tarefas do usuário a partir de mensagens de texto ou voz transcrita.
@@ -108,6 +115,183 @@ function parseReply(text) {
   return { reply: text.trim(), actions: [] };
 }
 
+// ---------- Planos e assinaturas ----------
+// Os preços valem daqui (o app só mostra); ninguém consegue pagar menos mexendo no app.
+const DEFAULT_PLANS = {
+  basico: { name: 'Básico', monthly: 1400, annual: null, aiMessages: 30 },
+  medio: { name: 'Médio', monthly: 2700, annual: null, aiMessages: 300 },
+  premium: { name: 'Premium', monthly: 9000, annual: null, aiMessages: null },
+};
+function plans(env) {
+  try { return env.PLANS ? JSON.parse(env.PLANS) : DEFAULT_PLANS; } catch (e) { return DEFAULT_PLANS; }
+}
+const billingOn = (env) => !!(env.STRIPE_SECRET_KEY && env.ACCOUNTS);
+const validClient = (id) => typeof id === 'string' && /^[a-f0-9]{32}$/.test(id);
+const ACTIVE = ['active', 'trialing', 'past_due'];
+
+// Cada pessoa (código do app) tem um Durable Object com a assinatura e o uso do mês.
+function account(env, clientId) {
+  const stub = env.ACCOUNTS.get(env.ACCOUNTS.idFromName(clientId));
+  const call = async (op, key, value) => (await stub.fetch('https://account/', { method: 'POST', body: JSON.stringify({ op, key, value }) })).json();
+  return { get: (k) => call('get', k), put: (k, v) => call('put', k, v), incr: (k) => call('incr', k) };
+}
+
+export class Accounts {
+  constructor(state) { this.storage = state.storage; }
+  async fetch(request) {
+    const { op, key, value } = await request.json();
+    if (op === 'get') return Response.json((await this.storage.get(key)) ?? null);
+    if (op === 'put') { await this.storage.put(key, value); return Response.json(true); }
+    if (op === 'incr') { const n = ((await this.storage.get(key)) || 0) + 1; await this.storage.put(key, n); return Response.json(n); }
+    return Response.json(null, { status: 400 });
+  }
+}
+
+// Chamada à API da Stripe (formulário no formato a[b][c]=valor).
+function form(obj, prefix = '', out = new URLSearchParams()) {
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null) continue;
+    const key = prefix ? `${prefix}[${k}]` : k;
+    if (typeof v === 'object') form(v, key, out); else out.append(key, String(v));
+  }
+  return out;
+}
+async function stripe(env, path, params, method = 'POST') {
+  const res = await fetch('https://api.stripe.com/v1/' + path, {
+    method,
+    headers: { authorization: 'Bearer ' + env.STRIPE_SECRET_KEY, 'content-type': 'application/x-www-form-urlencoded' },
+    body: method === 'POST' ? form(params) : undefined,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ? data.error.message : 'Stripe ' + res.status);
+  return data;
+}
+
+// Confere a assinatura do webhook (cabeçalho Stripe-Signature: t=...,v1=...).
+async function verifyStripe(raw, header, secret) {
+  if (!header || !secret) return false;
+  const parts = Object.fromEntries(header.split(',').map((x) => x.split('=')).filter((x) => x.length === 2).map(([k, v]) => [k, v]));
+  const sigs = header.split(',').filter((x) => x.startsWith('v1=')).map((x) => x.slice(3));
+  const t = Number(parts.t);
+  if (!t || !sigs.length || Math.abs(Date.now() / 1000 - t) > 300) return false;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${t}.${raw}`)));
+  const hex = [...mac].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return sigs.some((s) => s.length === hex.length && [...s].every((c, i) => c === hex[i]));
+}
+
+function subFromStripe(obj, meta) {
+  const item = obj.items && obj.items.data && obj.items.data[0];
+  const end = obj.current_period_end || (item && item.current_period_end) || null;
+  return {
+    plan: meta.plan, billing: meta.billing || 'monthly', status: obj.status,
+    customer: obj.customer, subscription: obj.id,
+    renewsAt: end ? new Date(end * 1000).toISOString() : null,
+    cancelAtPeriodEnd: !!obj.cancel_at_period_end,
+  };
+}
+
+function allowedReturn(env, returnUrl) {
+  try {
+    const u = new URL(returnUrl);
+    const allowed = (env.ALLOWED_ORIGINS || '').split(',').map((x) => x.trim());
+    return allowed.includes(u.origin) ? u.origin + u.pathname : null;
+  } catch (e) { return null; }
+}
+
+async function handleBilling(request, env, url, cors) {
+  const P = plans(env);
+
+  // Webhook da Stripe: sem CORS, conferido pela assinatura.
+  if (url.pathname === '/stripe/webhook' && request.method === 'POST') {
+    const raw = await request.text();
+    if (!(await verifyStripe(raw, request.headers.get('stripe-signature'), env.STRIPE_WEBHOOK_SECRET))) return new Response('assinatura inválida', { status: 400 });
+    const event = JSON.parse(raw);
+    const obj = event.data && event.data.object;
+    if (event.type === 'checkout.session.completed' && obj && obj.mode === 'subscription') {
+      const clientId = obj.client_reference_id;
+      if (validClient(clientId) && obj.subscription) {
+        const sub = await stripe(env, 'subscriptions/' + obj.subscription, null, 'GET');
+        await account(env, clientId).put('sub', subFromStripe(sub, sub.metadata || obj.metadata || {}));
+      }
+    } else if (['customer.subscription.updated', 'customer.subscription.deleted', 'customer.subscription.created'].includes(event.type) && obj) {
+      const meta = obj.metadata || {};
+      if (validClient(meta.clientId)) await account(env, meta.clientId).put('sub', subFromStripe(obj, meta));
+    }
+    return new Response('ok');
+  }
+
+  if (!cors._ok) return json({ error: 'Origem não permitida' }, 403, cors);
+
+  if (url.pathname === '/plan' && request.method === 'GET') {
+    const clientId = url.searchParams.get('client');
+    const catalog = Object.fromEntries(Object.entries(P).map(([k, v]) => [k, { name: v.name, monthly: v.monthly, annual: v.annual, aiMessages: v.aiMessages }]));
+    if (!billingOn(env)) return json({ billing: false, plans: catalog }, 200, cors);
+    if (!validClient(clientId)) return json({ error: 'Código inválido' }, 400, cors);
+    const acc = account(env, clientId);
+    const sub = await acc.get('sub');
+    const active = sub && ACTIVE.includes(sub.status) && P[sub.plan];
+    const used = (await acc.get('usage:' + new Date().toISOString().slice(0, 7))) || 0;
+    return json({
+      billing: true, plans: catalog,
+      plan: active ? sub.plan : null, status: sub ? sub.status : null,
+      renewsAt: sub ? sub.renewsAt : null, cancelAtPeriodEnd: sub ? sub.cancelAtPeriodEnd : false,
+      aiUsed: used, aiLimit: active ? P[sub.plan].aiMessages : 0,
+    }, 200, cors);
+  }
+
+  let body;
+  try { body = await request.json(); } catch (e) { return json({ error: 'JSON inválido' }, 400, cors); }
+  if (!billingOn(env)) return json({ error: 'Pagamentos ainda não configurados' }, 503, cors);
+  if (!validClient(body.clientId)) return json({ error: 'Código inválido' }, 400, cors);
+
+  if (url.pathname === '/checkout' && request.method === 'POST') {
+    const plan = P[body.plan];
+    const billing = body.billing === 'annual' ? 'annual' : 'monthly';
+    const amount = plan && plan[billing];
+    const back = allowedReturn(env, body.returnUrl);
+    if (!plan || !amount) return json({ error: 'Plano indisponível' }, 400, cors);
+    if (!back) return json({ error: 'Endereço de retorno não permitido' }, 400, cors);
+    const meta = { clientId: body.clientId, plan: body.plan, billing };
+    const session = await stripe(env, 'checkout/sessions', {
+      mode: 'subscription',
+      client_reference_id: body.clientId,
+      success_url: back + '?pago=1',
+      cancel_url: back + '?pago=0',
+      locale: 'pt-BR',
+      allow_promotion_codes: 'true',
+      metadata: meta,
+      subscription_data: { metadata: meta },
+      line_items: { 0: { quantity: 1, price_data: { currency: 'brl', unit_amount: amount, recurring: { interval: billing === 'annual' ? 'year' : 'month' }, product_data: { name: `Zeny ${plan.name}` } } } },
+    });
+    return json({ url: session.url }, 200, cors);
+  }
+
+  if (url.pathname === '/portal' && request.method === 'POST') {
+    const sub = await account(env, body.clientId).get('sub');
+    const back = allowedReturn(env, body.returnUrl);
+    if (!sub || !sub.customer) return json({ error: 'Nenhuma assinatura encontrada' }, 404, cors);
+    const portal = await stripe(env, 'billing_portal/sessions', { customer: sub.customer, return_url: back || undefined, locale: 'pt-BR' });
+    return json({ url: portal.url }, 200, cors);
+  }
+
+  return json({ error: 'Não encontrado' }, 404, cors);
+}
+
+// Com a Stripe configurada, a IA exige assinatura ativa e respeita o limite do plano.
+async function checkAiQuota(env, clientId) {
+  if (!billingOn(env)) return null;
+  if (!validClient(clientId)) return { status: 402, code: 'no_plan', error: 'Assine um plano para conversar com a IA.' };
+  const acc = account(env, clientId);
+  const sub = await acc.get('sub');
+  const P = plans(env);
+  if (!sub || !ACTIVE.includes(sub.status) || !P[sub.plan]) return { status: 402, code: 'no_plan', error: 'Assine um plano para conversar com a IA.' };
+  const limit = P[sub.plan].aiMessages;
+  const key = 'usage:' + new Date().toISOString().slice(0, 7);
+  if (limit != null && ((await acc.get(key)) || 0) >= limit) return { status: 429, code: 'quota', error: `Você usou as ${limit} mensagens com a IA do plano ${P[sub.plan].name} este mês.` };
+  return { acc, key };
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -115,7 +299,13 @@ export default {
     const cors = corsHeaders(origin, env);
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: (({ _ok, ...h }) => h)(cors) });
-    if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true }, 200, cors);
+    if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true, billing: billingOn(env) }, 200, cors);
+    if (['/plan', '/checkout', '/portal', '/stripe/webhook'].includes(url.pathname)) {
+      try { return await handleBilling(request, env, url, cors); } catch (e) {
+        console.error('billing', e);
+        return json({ error: 'Não foi possível falar com a Stripe agora.' }, 502, cors);
+      }
+    }
     if (request.method !== 'POST' || url.pathname !== '/chat') return json({ error: 'Não encontrado' }, 404, cors);
     if (!cors._ok) return json({ error: 'Origem não permitida' }, 403, cors);
     if (!env.ANTHROPIC_API_KEY) return json({ error: 'Servidor sem chave configurada' }, 500, cors);
@@ -129,6 +319,9 @@ export default {
     const context = String(body.context || '{}').slice(0, MAX_CONTEXT);
     const history = Array.isArray(body.history) ? body.history : [];
     if (!message) return json({ error: 'Mensagem vazia' }, 400, cors);
+
+    const quota = await checkAiQuota(env, body.clientId);
+    if (quota && quota.error) return json({ error: quota.error, code: quota.code }, quota.status, cors);
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -148,6 +341,7 @@ export default {
       console.error('Anthropic', res.status, await res.text());
       return json({ error: 'IA indisponível no momento' }, 502, cors);
     }
+    if (quota && quota.acc) await quota.acc.incr(quota.key);
     const data = await res.json();
     const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
     return json(parseReply(text), 200, cors);

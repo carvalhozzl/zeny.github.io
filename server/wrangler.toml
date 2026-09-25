@@ -7,6 +7,24 @@ compatibility_date = "2026-09-01"
 ALLOWED_ORIGINS = "https://carvalhozzl.github.io,https://localhost,http://localhost:8080"
 MODEL = "claude-sonnet-5"
 RATE_LIMIT = "20"
+# Preços em centavos (1400 = R$ 14,00) e mensagens de IA por mês (null = sem limite).
+# Para ativar o plano anual, troque "annual": null pelo valor do ano em centavos.
+PLANS = '''{
+  "basico":  { "name": "Básico",  "monthly": 1400, "annual": null, "aiMessages": 30 },
+  "medio":   { "name": "Médio",   "monthly": 2700, "annual": null, "aiMessages": 300 },
+  "premium": { "name": "Premium", "monthly": 9000, "annual": null, "aiMessages": null }
+}'''
 
-# A chave NÃO fica aqui. Configure com:
+# Assinaturas e uso da IA de cada pessoa (não precisa criar nada no painel).
+[[durable_objects.bindings]]
+name = "ACCOUNTS"
+class_name = "Accounts"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Accounts"]
+
+# As chaves NÃO ficam aqui. Configure com:
 #   npx wrangler secret put ANTHROPIC_API_KEY
+#   npx wrangler secret put STRIPE_SECRET_KEY
+#   npx wrangler secret put STRIPE_WEBHOOK_SECRET

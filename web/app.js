@@ -95,11 +95,17 @@
   ];
   const PLAN_CFG = CFG.plans || {};
   const PLANS = Array.isArray(PLAN_CFG.list) && PLAN_CFG.list.length ? PLAN_CFG.list : DEFAULT_PLANS;
-  const ENFORCE = !!PLAN_CFG.enforce;
-  const currentPlan = () => PLANS.find((p) => p.id === S.settings.plan) || PLANS[0];
+  // Com a Stripe ligada no servidor, o plano vem da assinatura confirmada e os limites valem.
+  const billingOn = () => !!(S.settings.sub && S.settings.sub.billing);
+  const enforced = () => !!PLAN_CFG.enforce || billingOn();
+  const FREE_PLAN = { id: 'free', name: 'Sem plano', limits: Object.assign({ aiMessages: 0, habits: 3, goals: 1, wishes: 3, business: false, autoSubs: false, export: false }, PLAN_CFG.free || {}) };
+  const currentPlan = () => {
+    if (billingOn()) return PLANS.find((p) => p.id === S.settings.sub.plan) || FREE_PLAN;
+    return PLANS.find((p) => p.id === S.settings.plan) || PLANS[0];
+  };
   const limitOf = (key) => (currentPlan().limits || {})[key];
-  const allowed = (key) => !ENFORCE || limitOf(key) !== false;
-  const underLimit = (key, count) => { if (!ENFORCE) return true; const v = limitOf(key); return v == null || count < v; };
+  const allowed = (key) => !enforced() || limitOf(key) !== false;
+  const underLimit = (key, count) => { if (!enforced()) return true; const v = limitOf(key); return v == null || count < v; };
   const planWith = (key) => PLANS.find((p) => { const v = (p.limits || {})[key]; return v === true || v == null; });
   function gate(text) { toast(text, { label: 'Ver planos', fn: () => go('plans') }); }
 
@@ -183,6 +189,12 @@
   }
 
   let S = load();
+  if (!/^[a-f0-9]{32}$/.test(S.settings.clientId || '')) {
+    const b = new Uint8Array(16);
+    (window.crypto || {}).getRandomValues ? crypto.getRandomValues(b) : b.forEach((_, i) => { b[i] = Math.floor(Math.random() * 256); });
+    S.settings.clientId = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+    save();
+  }
 
   // ---------- Alterações com "desfazer" ----------
   const undoStack = [];
@@ -838,13 +850,14 @@ Regras:
     const res = await fetch(serverUrl() + '/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: text, history, context: aiContext() }),
+      body: JSON.stringify({ message: text, history, context: aiContext(), clientId: S.settings.clientId }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw { code: res.status === 429 ? 'rate_limited' : 'upstream_error', message: data.error };
+    if (!res.ok) throw { code: data.code || (res.status === 429 ? 'rate_limited' : 'upstream_error'), message: data.error };
     return normalizeAi(data);
   }
   function aiQuotaOk() {
+    if (billingOn()) return true; // com a Stripe, quem controla o limite é o servidor
     const key = monthKey(new Date());
     if (S.usage.month !== key) S.usage = { month: key, ai: 0 };
     return underLimit('aiMessages', S.usage.ai);
@@ -860,6 +873,9 @@ Regras:
       sampleOff = true;
       renderAiStatus();
       toast('A IA do Claude não foi liberada nesta página. Respondi no modo local.');
+    } else if (code === 'no_plan' || code === 'quota') {
+      gate(e.message || 'Assine um plano para conversar com a IA.');
+      refreshPlan();
     } else if (code === 'rate_limited') {
       toast(e.message || 'Muitas mensagens seguidas. Respondi no modo local.');
     } else {
@@ -981,6 +997,7 @@ Regras:
   }
 
   let busy = false;
+  let noPlanWarned = false;
   async function handleUser(raw) {
     const text = String(raw || '').trim().slice(0, 2000);
     if (!text || busy) return;
@@ -997,7 +1014,11 @@ Regras:
 
     const typing = showTyping();
     const started = Date.now();
-    const mode = aiMode();
+    let mode = aiMode();
+    if (mode === 'server' && billingOn() && !S.settings.sub.plan) {
+      mode = 'local';
+      if (!noPlanWarned) { noPlanWarned = true; gate('Assine um plano para conversar com a IA. Comandos simples continuam funcionando.'); }
+    }
     let result = null;
     try {
       if (mode !== 'local') {
@@ -1677,15 +1698,16 @@ Regras:
     return best;
   }
   function usageCard() {
-    const limit = limitOf('aiMessages');
-    const used = S.usage.month === monthKey(new Date()) ? S.usage.ai : 0;
+    const srv = billingOn() ? S.settings.sub : null;
+    const limit = srv ? srv.aiLimit : limitOf('aiMessages');
+    const used = srv ? srv.aiUsed || 0 : S.usage.month === monthKey(new Date()) ? S.usage.ai : 0;
     const p = limit ? Math.min(1, used / limit) : 0;
     return `<section class="card" style="margin-bottom:20px">
-      <div class="card-head"><div><span class="eyebrow">Seu plano</span><h2 style="margin-top:4px">${esc(currentPlan().name)}</h2></div><span class="pill tone-accent">${ic('crown')}${ENFORCE ? 'Ativo' : 'Modo de teste'}</span></div>
+      <div class="card-head"><div><span class="eyebrow">Seu plano</span><h2 style="margin-top:4px">${esc(currentPlan().name)}</h2></div><span class="pill tone-accent">${ic('crown')}${billingOn() ? (S.settings.sub.plan ? 'Ativo' : 'Sem assinatura') : enforced() ? 'Ativo' : 'Modo de teste'}</span></div>
       <div class="usage">
         <div class="top"><span>Mensagens com a IA este mês</span><span class="num">${limit == null ? `${used} · sem limite` : `${used} de ${limit}`}</span></div>
         ${limit == null ? '' : `<div class="bar ${p >= 1 ? 'over' : p >= 0.8 ? 'warn' : ''}"><i style="width:${(p * 100).toFixed(1)}%"></i></div>`}
-        ${ENFORCE ? '' : '<p class="small muted">Os limites ainda não estão sendo aplicados. Tudo está liberado enquanto as assinaturas não abrem.</p>'}
+        ${enforced() ? '' : '<p class="small muted">Os limites ainda não estão sendo aplicados. Tudo está liberado enquanto as assinaturas não abrem.</p>'}
       </div>
     </section>`;
   }
@@ -1697,7 +1719,7 @@ Regras:
     const trial = Number(PLAN_CFG.trialDays) || 0;
     const cards = PLANS.map((p) => {
       const { price, note } = priceBlock(p, billing);
-      const isCurrent = p.id === currentPlan().id && ENFORCE;
+      const isCurrent = p.id === currentPlan().id && enforced();
       const link = p.checkout && p.checkout[billing];
       const cta = isCurrent
         ? `<div class="current">${ic('check', 'sm')}Seu plano atual</div>`
@@ -1739,10 +1761,11 @@ Regras:
     const th = S.settings.theme;
     const limitedExport = !allowed('export');
     return `<div class="settings">
+      ${subscriptionCard()}
       <section class="card">
         <header class="card-head"><h2>Perfil</h2></header>
         <div class="set-row"><div class="grow"><div class="title">Seu nome</div><div class="desc">Como o Zeny te chama nas mensagens.</div></div><input type="text" id="setName" data-set="userName" value="${esc(S.settings.userName)}" placeholder="Seu nome" maxlength="40"></div>
-        <div class="set-row"><div class="grow"><div class="title">Plano</div><div class="desc">${esc(currentPlan().name)}${ENFORCE ? '' : ' · modo de teste'}</div></div><button type="button" class="btn sm ghost" data-go="plans">${ic('crown', 'sm')}Ver planos</button></div>
+        <div class="set-row"><div class="grow"><div class="title">Plano</div><div class="desc">${esc(currentPlan().name)}${enforced() ? '' : ' · modo de teste'}</div></div><button type="button" class="btn sm ghost" data-go="plans">${ic('crown', 'sm')}Ver planos</button></div>
       </section>
       <section class="card">
         <header class="card-head"><h2>Aparência</h2></header>
@@ -2095,15 +2118,82 @@ Regras:
   async function choosePlan(planId) {
     const p = PLANS.find((x) => x.id === planId);
     if (!p) return;
-    const intro = ENFORCE
+    if (billingOn() && serverUrl()) return startCheckout(p);
+    const intro = enforced()
       ? `As assinaturas do plano ${p.name} abrem em breve.`
       : `As assinaturas abrem em breve. Enquanto isso, você pode ativar o plano ${p.name} em modo de teste para ver como ele funciona.`;
-    const r = await openForm(`Plano ${p.name}`, [], { intro, ok: ENFORCE ? 'Entendi' : 'Ativar em teste', noFocus: true });
-    if (r && !ENFORCE) {
+    const r = await openForm(`Plano ${p.name}`, [], { intro, ok: enforced() ? 'Entendi' : 'Ativar em teste', noFocus: true });
+    if (r && !enforced()) {
       S.settings.plan = p.id;
       save(); renderAll();
       toast(`Plano ${p.name} ativado em modo de teste`);
     }
+  }
+
+  // ---------- Assinatura (Stripe, pelo servidor) ----------
+  const returnUrl = () => location.origin + location.pathname;
+  async function serverPost(path, body) {
+    const res = await fetch(serverUrl() + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Não foi possível completar agora.');
+    return data;
+  }
+  async function refreshPlan() {
+    if (!serverUrl()) return;
+    try {
+      const res = await fetch(`${serverUrl()}/plan?client=${S.settings.clientId}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      S.settings.sub = data.billing ? { billing: true, plan: data.plan, status: data.status, renewsAt: data.renewsAt, cancelAtPeriodEnd: data.cancelAtPeriodEnd, aiUsed: data.aiUsed, aiLimit: data.aiLimit } : null;
+      save();
+      renderAll();
+    } catch (e) { /* sem internet: mantém o último plano conhecido */ }
+  }
+  async function startCheckout(p) {
+    const billing = S.settings.billing === 'annual' && Number.isFinite(p.annual) ? 'annual' : 'monthly';
+    toast('Abrindo o pagamento seguro da Stripe…');
+    try {
+      const { url } = await serverPost('/checkout', { clientId: S.settings.clientId, plan: p.id, billing, returnUrl: returnUrl() });
+      location.href = url;
+    } catch (e) { toast(e.message); }
+  }
+  async function openPortal() {
+    try {
+      const { url } = await serverPost('/portal', { clientId: S.settings.clientId, returnUrl: returnUrl() });
+      location.href = url;
+    } catch (e) { toast(e.message); }
+  }
+  async function useCodeForm() {
+    const r = await openForm('Usar assinatura de outro aparelho', [
+      { name: 'code', label: 'Código da assinatura', required: true, placeholder: '32 letras e números', maxlength: 40 },
+    ], { intro: 'Copie o código em Ajustes → Assinatura no aparelho onde você assinou.', ok: 'Usar código' });
+    if (!r) return;
+    const code = r.values.code.trim().toLowerCase();
+    if (!/^[a-f0-9]{32}$/.test(code)) { toast('Esse código não é válido.'); return; }
+    S.settings.clientId = code;
+    save();
+    await refreshPlan();
+    toast(S.settings.sub && S.settings.sub.plan ? `Plano ${currentPlan().name} ativado neste aparelho` : 'Nenhuma assinatura ativa com esse código.');
+  }
+  function copyCode() {
+    const code = S.settings.clientId;
+    const done = () => toast('Código copiado');
+    try { navigator.clipboard.writeText(code).then(done, () => toast(code)); } catch (e) { toast(code); }
+  }
+  function subscriptionCard() {
+    if (!billingOn()) return '';
+    const sub = S.settings.sub;
+    const renew = sub.renewsAt ? new Date(sub.renewsAt).toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' }) : '';
+    const status = sub.plan
+      ? `Plano ${esc(currentPlan().name)}${renew ? (sub.cancelAtPeriodEnd ? ` · termina em ${renew}` : ` · renova em ${renew}`) : ''}${sub.status === 'past_due' ? ' · pagamento pendente' : ''}`
+      : 'Você ainda não tem assinatura.';
+    return `<section class="card">
+      <header class="card-head"><h2>Assinatura</h2></header>
+      <div class="set-row"><div class="grow"><div class="title">${status}</div><div class="desc">Pagamento processado pela Stripe.</div></div>
+        ${sub.plan ? `<button type="button" class="btn sm ghost" data-act="portal">${ic('wallet', 'sm')}Gerenciar</button>` : `<button type="button" class="btn sm primary" data-go="plans">${ic('crown', 'sm')}Assinar</button>`}</div>
+      <div class="set-row"><div class="grow"><div class="title">Código da assinatura</div><div class="desc">Use para ativar sua assinatura em outro aparelho. Não compartilhe.</div></div><button type="button" class="btn sm ghost" data-act="copy-code">Copiar código</button></div>
+      <div class="set-row"><div class="grow"><div class="title">Já assinou em outro aparelho?</div><div class="desc">Cole o código de lá para liberar seu plano aqui.</div></div><button type="button" class="btn sm ghost" data-act="use-code">Usar código</button></div>
+    </section>`;
   }
 
   // ---------- Dados ----------
@@ -2278,6 +2368,9 @@ Regras:
     'wish-save': (id) => { const x = S.wishes.find((t) => t.id === id); if (x) depositForm(x); },
     'wish-buy': (id) => { const x = S.wishes.find((t) => t.id === id); if (x) buyForm(x); },
     'notif-enable': () => requestNotifications(),
+    'portal': () => openPortal(),
+    'copy-code': () => copyCode(),
+    'use-code': () => useCodeForm(),
     'persona': (id) => { S.settings.persona = id === 'genio' ? 'genio' : 'padrao'; if (id === 'genio' && S.settings.voiceStyle === 'padrao') S.settings.voiceStyle = 'confiante'; save(); renderMain(); toast(id === 'genio' ? 'Personalidade Gênio ativada. Às ordens, chefe.' : 'Personalidade padrão ativada'); },
     'voice-style': (id) => { S.settings.voiceStyle = VOICE_STYLES[id] ? id : 'padrao'; save(); renderMain(); speak(SAMPLE(), true); },
     'voice-test': () => speak(SAMPLE(), true),
@@ -2398,6 +2491,7 @@ Regras:
       if (document.hidden) return;
       postSubscriptions();
       renderAll();
+      refreshPlan();
     });
     window.matchMedia('(min-width: 1024px)').addEventListener?.('change', () => $('#shell').classList.remove('chat-open'));
   }
@@ -2421,6 +2515,14 @@ Regras:
   setComposer();
   connectClaude();
   if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => { if (current === 'settings') renderMain(); };
+  // Voltou do pagamento da Stripe.
+  const paid = new URLSearchParams(location.search).get('pago');
+  if (paid !== null) {
+    history.replaceState(null, '', location.pathname);
+    if (paid === '1') { toast('Pagamento confirmado! Ativando seu plano…'); setTimeout(refreshPlan, 2500); }
+    else toast('Pagamento cancelado. Nada foi cobrado.');
+  }
+  refreshPlan();
   refreshNotifStatus().then(() => { if (current === 'settings' || current === 'wishes') renderMain(); });
   if (!S.settings.onboarded) showOnboarding();
   else welcome();
