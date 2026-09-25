@@ -22,7 +22,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configurar servidor da IA
         run: ./scripts/set-server-url.sh "${{ vars.ZENY_SERVER_URL }}"
       - uses: actions/configure-pages@v5

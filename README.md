@@ -103,7 +103,7 @@ Cada envio para a `main` gera o app automaticamente em **Actions → App Android
 
 #### Rodar o Android no computador
 
-Precisa do Node 22, do Java 21 e do Android Studio.
+Precisa do Node 22, do Java 21 e do Android Studio (Capacitor 8).
 
 ```bash
 npm install
